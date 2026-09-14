@@ -1,0 +1,363 @@
+{
+  "info": {
+    "name": "Aircraft Route Planner",
+    "description": "HTTP API for the aircraft-route-planner Go service. Set the `baseUrl` collection variable to point at your server (default http://localhost:8080).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "a1c70acf-1b0e-4e9a-9d2a-arp00000001"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Returns graph stats (airport / edge / aircraft / country counts) and Neo4j connectivity. `status` is `ok` if Neo4j is reachable, `degraded` otherwise."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Routes",
+      "item": [
+        {
+          "name": "GET /routes — A380 LHR→SYD strict (max 2 hops)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&max_hops=2",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388", "description": "IATA, ICAO, or family alias (e.g. 388, A388, A380)." },
+                { "key": "from", "value": "LHR", "description": "Origin airport IATA code." },
+                { "key": "to", "value": "SYD", "description": "Destination airport IATA code." },
+                { "key": "max_hops", "value": "2", "description": "0–GRAPH_MAX_HOPS. Larger values are silently clamped." }
+              ]
+            },
+            "description": "Strict BFS — every leg must use the specified aircraft. Default `mode=strict`, `sort=hops`."
+          }
+        },
+        {
+          "name": "GET /routes — A380 LHR→SYD inclusive",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&max_hops=2&mode=inclusive",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" },
+                { "key": "max_hops", "value": "2" },
+                { "key": "mode", "value": "inclusive", "description": "At least one leg must use the target aircraft." }
+              ]
+            },
+            "description": "Inclusive mode: any path with ≥1 leg on the target aircraft. Per-leg `is_target` flag indicates which legs match."
+          }
+        },
+        {
+          "name": "GET /routes — sort=distance (Dijkstra)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&max_hops=2&sort=distance",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" },
+                { "key": "max_hops", "value": "2" },
+                { "key": "sort", "value": "distance", "description": "Returns 0 or 1 result (shortest by total Haversine distance)." }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /routes — A350 family (multi-code)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=A350&from=LHR&to=JFK&max_hops=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "A350", "description": "Family alias resolves to all member IATA codes (e.g. 359, 351). `meta.aircraft` becomes an array." },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "JFK" },
+                { "key": "max_hops", "value": "1" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /routes/from — A380 from LHR",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes/from?aircraft=388&from=LHR&max_hops=2",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes", "from"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "max_hops", "value": "2" }
+              ]
+            },
+            "description": "Every reachable airport on the target aircraft within the hop limit. Returns 1300+ destinations on A380 from LHR with `max_hops=2`."
+          }
+        },
+        {
+          "name": "GET /routes/from — inclusive 737 from LHR",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes/from?aircraft=738&from=LHR&max_hops=2&mode=inclusive",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes", "from"],
+              "query": [
+                { "key": "aircraft", "value": "738" },
+                { "key": "from", "value": "LHR" },
+                { "key": "max_hops", "value": "2" },
+                { "key": "mode", "value": "inclusive" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Country routes",
+      "item": [
+        {
+          "name": "GET /routes/countries — UK→Australia (any aircraft)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes/countries?from=United Kingdom&to=Australia",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes", "countries"],
+              "query": [
+                { "key": "from", "value": "United Kingdom", "description": "Country name (must match exactly — use /countries/search for autocomplete)." },
+                { "key": "to", "value": "Australia" }
+              ]
+            },
+            "description": "Direct flights only. Results grouped by airport pair."
+          }
+        },
+        {
+          "name": "GET /routes/countries — UK→Australia filtered to A380",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes/countries?from=United Kingdom&to=Australia&aircraft=388",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes", "countries"],
+              "query": [
+                { "key": "from", "value": "United Kingdom" },
+                { "key": "to", "value": "Australia" },
+                { "key": "aircraft", "value": "388" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "item": [
+        {
+          "name": "GET /airports/search?q=london",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/airports/search?q=london",
+              "host": ["{{baseUrl}}"],
+              "path": ["airports", "search"],
+              "query": [
+                { "key": "q", "value": "london", "description": "Neo4j full-text search on name/city/country/IATA. Up to 20 results, sorted by score." }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /aircraft/search?q=A380",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/aircraft/search?q=A380",
+              "host": ["{{baseUrl}}"],
+              "path": ["aircraft", "search"],
+              "query": [
+                { "key": "q", "value": "A380", "description": "Neo4j full-text search on aircraft name / IATA / ICAO / family." }
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET /countries/search?q=united",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/countries/search?q=united",
+              "host": ["{{baseUrl}}"],
+              "path": ["countries", "search"],
+              "query": [
+                { "key": "q", "value": "united", "description": "Case-insensitive substring match against in-memory country list." }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Edge cases",
+      "description": "Phase 4 error contract: 400 for bad input, 404 for not-found entities. Errors are structured: `{\"error\": {\"code\": \"...\", \"message\": \"...\"}}`.",
+      "item": [
+        {
+          "name": "400 MISSING_PARAM (no aircraft)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?from=LHR&to=SYD",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "404 INVALID_AIRCRAFT",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=XYZ&from=LHR&to=SYD",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "XYZ" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "404 INVALID_AIRPORT",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=ZZZ&to=SYD",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "ZZZ" },
+                { "key": "to", "value": "SYD" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "400 INVALID_MODE",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&mode=banana",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" },
+                { "key": "mode", "value": "banana" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "400 INVALID_SORT",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&sort=banana",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" },
+                { "key": "sort", "value": "banana" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "404 COUNTRY_NOT_FOUND",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes/countries?from=Atlantis&to=Australia",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes", "countries"],
+              "query": [
+                { "key": "from", "value": "Atlantis" },
+                { "key": "to", "value": "Australia" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "200 max_hops=99 (silently clamped)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/routes?aircraft=388&from=LHR&to=SYD&max_hops=99",
+              "host": ["{{baseUrl}}"],
+              "path": ["routes"],
+              "query": [
+                { "key": "aircraft", "value": "388" },
+                { "key": "from", "value": "LHR" },
+                { "key": "to", "value": "SYD" },
+                { "key": "max_hops", "value": "99", "description": "Clamped to GRAPH_MAX_HOPS (default 3)." }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

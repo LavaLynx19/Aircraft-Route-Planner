@@ -1,0 +1,7 @@
+# The scheduled fetchers run under launchd on macOS Command Line Tools Python
+# 3.9.6 — specifically that interpreter, because it is the one holding the Full
+# Disk Access grant the launchd agents depend on (RUNBOOK.md §4). Ruff must
+# therefore not propose 3.10+ idioms: its UP045 fix rewrites
+# `Optional[int]` to `int | None`, which raises TypeError at function-definition
+# time on 3.9 and would break the daily run the next morning.
+target-version = "py39"

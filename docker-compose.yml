@@ -1,0 +1,26 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: aircraft-route-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      # This file never hardcoded a credential, unlike the staging one — but an
+      # unset variable substituted empty and produced an obscure container failure.
+      # `:?` fails the compose command with a readable reason instead. The username
+      # keeps a default; it is not a secret.
+      #
+      # Only governs a *freshly created* volume: Neo4j stores credentials in /data
+      # and ignores NEO4J_AUTH once initialised.
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+      - NEO4J_server_memory_heap_initial__size=1G
+      - NEO4J_server_memory_heap_max__size=2G
+      - NEO4J_server_memory_pagecache_size=512M
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

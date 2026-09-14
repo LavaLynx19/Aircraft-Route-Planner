@@ -1,0 +1,28 @@
+services:
+  neo4j-staging:
+    image: neo4j:5-community
+    container_name: aircraft-route-neo4j-staging
+    ports:
+      - "${NEO4J_STAGING_HTTP_PORT:-7475}:7474"
+      - "${NEO4J_STAGING_BOLT_PORT:-7688}:7687"
+    environment:
+      # No password fallback (2026-07-05 review S4 / 2026-09-10 review L2): the
+      # default published a working credential in the repository. `:?` fails the
+      # compose command with this message rather than substituting empty and
+      # producing an obscure container error. The username keeps a default — it is
+      # not a secret.
+      #
+      # Note this only governs a *freshly created* volume: Neo4j stores credentials
+      # in /data and ignores NEO4J_AUTH once initialised, so changing this does not
+      # re-key the existing container.
+      - NEO4J_AUTH=${NEO4J_STAGING_USER:-neo4j}/${NEO4J_STAGING_PASSWORD:?set NEO4J_STAGING_PASSWORD in .env}
+      - NEO4J_server_memory_heap_initial__size=512M
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=256M
+    volumes:
+      - neo4j_staging_data:/data
+      - neo4j_staging_logs:/logs
+
+volumes:
+  neo4j_staging_data:
+  neo4j_staging_logs:

@@ -1,0 +1,36 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Credentials — never commit
+credentials.json
+keys/
+
+# Raw data files
+ingest/data/
+
+# Go build artifacts
+bin/
+*.exe
+/aircraft-route-planner
+/server
+
+# Node modules
+web/node_modules/
+web/dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cache and Dumps
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Planning
+data_planning/

@@ -1,0 +1,2 @@
+1. Country search needs default (without query) listing and semantic matchhing or fuzzy search with relevance matching.
+2. Same for aircraft - need to give more thought on this for fuzzy search and relevancy. Queryless listing can still be implemented.
