@@ -506,12 +506,12 @@ direct route is never crowded out by arbitrary 2-hop ones.
       `CountryRouteMeta`, and — asserted on raw JSON rather than a typed struct, which would read a
       missing key as false — that `truncated` stays *absent* when nothing was capped, so an
       untruncated response is byte-identical to before the cap existed
-- [>] Per-state path/edge deep-copying in `extend` — the gain above is uneven: destination-seeking
+- [x] Per-state path/edge deep-copying in `extend` — the gain above is uneven: destination-seeking
       inclusive queries improved ~7x in time but their allocation volume is essentially unchanged
       (2.65 GB, 8.1M allocs at maxHops=3), because a tier only fills on a rare destination hit. This
       copying is now the dominant remaining cost and was named in the 2026-07-05 review
-      → defer until: Phase 6.8 (inclusive-mode allocation redesign — candidate: store parent pointers
-      per state instead of copying the path and edge slices on every expansion)
+      — **done in 6.8** (2026-09-15): parent-indexed states replaced the copies, the parent-pointer
+      candidate this item was originally deferred with
 
 Sub-choices that were deferred to CODE, and how they actually landed: **N = 250 per tier** (so a
 3-hop response is bounded at 1,000), and the cap applies to **every** variant, not inclusive only —
@@ -540,8 +540,22 @@ O(depth) copying per state. Named in the 2026-07-05 review and unaddressed since
       loaded once and queries are the only hot path — **decided 2026-09-14: yes**, scheduled directly
       after batch 10 (6.15). The ~2.65 GB is cumulative allocation (GC churn), not peak memory, but it
       is the largest remaining cost on the only hot path
-- [ ] If yes: parent-pointer states, materialise paths only for accepted results, re-run
-      `internal/graph` benchmarks and the unchanged baseline tests as the correctness proof
+- [x] If yes: parent-pointer states, materialise paths only for accepted results, re-run
+      `internal/graph` benchmarks and the unchanged baseline tests as the correctness proof —
+      **done 2026-09-15**, applied to all four BFS variants by decision (strict shared `extend`, so
+      converting only inclusive would have left two state representations); `FindShortestRoute`
+      untouched. `internal/graph/path_arena.go` holds the states; `extend` is deleted
+- [x] Correctness: baseline and bounds tests pass unmodified. A throwaway dump of 144 queries (all four
+      variants, hops 0–3, three aircraft sets, two sources, two destinations) was identical before and
+      after — counts, `truncated` flags and route digests
+- [x] Measured at maxHops=3 (mean of 3): inclusive 0.38 s / 2.65 GB / 8.05M allocs → **0.10 s / 338 MB /
+      1,134 allocs**; from-inclusive → 0.10 s / 338 MB / 1,817 allocs; strict 0.022 s / 87 MB →
+      0.010 s / 14.5 MB. Regression found and accepted: inclusive at maxHops=1 is ~5% slower
+      (429 → 450 µs, back-to-back A/B, 10 runs each) because loop detection follows parent pointers;
+      recorded in ARCHITECTURE.md §8.2
+- [>] The remaining ~338 MB per 3-hop inclusive query is state-slice regrowth (~5× the final state size);
+      a block-allocated arena would remove it → defer until: Phase 6.4 production cut-over, re-benchmark
+      against the promoted graph before deciding
 
 **Depends on:** 6.7 (the benchmarks and baseline tests that would verify it already exist).
 
@@ -764,8 +778,8 @@ Sep M4, M5, L7 plus the launchd late-fire found in 6.6. **Verified:** ruff clean
       currently reflect one 12-hour window only
       → defer until: the first sweep completes (~2026-09-28), then re-check that half 1 is selected
 
-**Remaining after batch 9** (updated 2026-09-14): batch 10 → 6.15, Jul S8 → 6.16, then the 6.8
-redesign. Still open beyond those: Jul M5 partials (full-name alias, `AliasToIATA` case-folding — 6.10's
+**Remaining after batch 9** (updated 2026-09-15): batch 10 → 6.15, Jul S8 → 6.16, the 6.8
+redesign (done 2026-09-15). Still open beyond those: Jul M5 partials (full-name alias, `AliasToIATA` case-folding — 6.10's
 deferrals), Jul S3 remainder (`haversine.go`/`loader.go` untested), Sep M6 (static source partition),
 and batch 11 — **17 ruff errors / 11 unformatted files** across `ingest/` and `tools/`, plus the
 `/health` nil-driver panic. **New 2026-09-14:** `web/public/assets/aircraft/ATTRIBUTION.md` reports

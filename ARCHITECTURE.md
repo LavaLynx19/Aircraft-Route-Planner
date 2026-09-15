@@ -979,6 +979,8 @@ FindRoutesInclusive(src, dst, aircraftCodes []string, maxHops):
 
 The only structural difference is: strict mode **filters edges** during traversal, inclusive mode **filters paths** at completion.
 
+The pseudocode shows each state carrying its path for readability. The implementation does not copy paths: a state holds its parent's index and a pointer to the edge that reached it, and a path is rebuilt only for a result (Phase 6.8, `internal/graph/path_arena.go`). The per-tier result cap and expansion gating are also left out here — see Section 8.2.
+
 ### 5.5 Country-to-Country Routes
 
 Country-to-country queries find all **direct flights** between airports in two countries. This is not a graph traversal — it's a filtered edge scan.
@@ -1220,7 +1222,7 @@ Two independent limits apply to every traversal (2026-07-05 review H1, built in 
 
   **Expansion is gated on the same counters, which is what makes this bound work and not only
   response size.** A state that can only contribute to tiers which are already full is never
-  enqueued, and its path/edge copies — the dominant allocation — are never made. A state at hop depth
+  enqueued. A state at hop depth
   *h* yields a destination match in tier *h* and each further descent lands one tier deeper, so its
   reachable tiers are exactly *h..maxHops*; when all of those are full it is pruned. This is
   output-preserving: a pruned subtree could only have produced results the cap would have rejected,
@@ -1245,8 +1247,32 @@ Two independent limits apply to every traversal (2026-07-05 review H1, built in 
   candidate result, so tiers fill quickly and gating engages early: ~74x faster with ~100x fewer
   allocations. For destination-*seeking* queries a tier only fills on a destination *hit*, which is
   rare in a large graph, so gating engages late — time improves ~7x while allocation volume is
-  essentially unchanged. That residue is the per-state path/edge deep-copying the 2026-07-05 review
-  named; it is untouched and is now the dominant remaining cost of an inclusive query.
+  essentially unchanged. That residue was the per-state path/edge deep-copying the 2026-07-05 review
+  named, removed in Phase 6.8.
+
+  **States no longer copy their paths (Phase 6.8, 2026-09-15).** Each BFS state used to carry its own
+  copy of the path and edge list, made on every expansion. States now live in one slice per traversal
+  and hold only their predecessor's index plus a pointer to the adjacency entry that reached them
+  (`internal/graph/path_arena.go`); a path is rebuilt only for a state that becomes a result, of which
+  there are at most 1,000. The pointer is sound only because the graph is immutable after load. Output
+  is unchanged: the baseline tests pass unmodified, and 144 queries across all four BFS variants on the
+  benchmark fixture returned identical routes, distances and `truncated` flags before and after. Same
+  400-edge-hub fixture at maxHops=3, M4 Pro, mean of 3 runs, both columns measured 2026-09-15:
+
+  | traversal | before (path copies) | after (parent-indexed states) |
+  |---|---|---|
+  | `FindRoutesInclusive` | 0.38 s / 2.65 GB / 8.05M allocs | **0.10 s** / 338 MB / 1,134 allocs |
+  | `FindRoutesFromInclusive` | 0.38 s / 2.66 GB / 8.08M allocs | **0.10 s** / 338 MB / 1,817 allocs |
+  | `FindRoutes` (strict) | 0.022 s / 87 MB / 302K allocs | **0.010 s** / 14.5 MB / 2,608 allocs |
+
+  Nearly all of the remaining bytes are the state slice regrowing: Go grows a large slice by about 25%
+  and copies it each time, so cumulative allocation comes to roughly five times the final size of the
+  states themselves. A block-allocated arena would remove that if it ever matters. One small query got
+  slower: a destination-seeking inclusive walk at maxHops=1 measured ~5% slower (429 → 450 µs,
+  back-to-back, 10 runs each), because loop detection now follows parent pointers into the adjacency
+  data instead of scanning a two-element slice in place. Every other benchmarked query measured faster.
+  `FindShortestRoute` still copies paths: its heap items are a different structure, and its only bound
+  is the time budget.
 - **A time budget.** Each traversal runs under a 10s context deadline, stated relative to the
   server's 30s `WriteTimeout`, because the two are easily confused: `WriteTimeout` closes the
   *connection* but does **not** cancel the request context, so without an explicit budget an

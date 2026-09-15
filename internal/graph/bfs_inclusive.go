@@ -2,21 +2,15 @@ package graph
 
 import "context"
 
-type bfsIncState struct {
-	node      string
-	path      []string
-	edges     []Edge
-	hasTarget bool
-}
-
 // FindRoutesInclusive performs inclusive BFS: at least one leg must use the given aircraft.
 // All edges are traversed; paths are accepted only if hasTarget is true at destination.
 //
 // This is the traversal H1 was really about: because every edge is followed and a
 // single matching leg qualifies an entire path, a 3-hop query from a mega-hub
-// enumerates millions of states. Expansion gating on the per-tier counters is what
-// keeps that bounded — see the note on MaxRoutesPerHopTier. Return values follow
-// FindRoutes.
+// enumerates millions of states. Expansion gating on the per-tier counters bounds
+// the work, and parent-indexed states (pathState) keep each of those states from
+// copying its path — see the notes on MaxRoutesPerHopTier and pathState. Return
+// values follow FindRoutes.
 func (g *Graph) FindRoutesInclusive(ctx context.Context, src, dst string, aircraftCodes []string, maxHops int) ([]Route, bool, error) {
 	if src == dst || len(aircraftCodes) == 0 {
 		return nil, false, nil
@@ -27,40 +21,41 @@ func (g *Graph) FindRoutesInclusive(ctx context.Context, src, dst string, aircra
 		acSet[c] = true
 	}
 
-	queue := make([]bfsIncState, 0, 1024)
-	queue = append(queue, bfsIncState{node: src, path: []string{src}})
+	arena := newPathArena(src, 1024)
 	col := newRouteCollector(maxHops)
 
 walk:
-	for i := 0; i < len(queue); i++ {
+	for i := 0; i < len(arena.states); i++ {
 		if i%ctxCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
 			}
 		}
-		st := queue[i]
-		hops := len(st.path) - 1
+		cur := int32(i)
+		hops := int(arena.states[i].hops)
+		hasTarget := arena.states[i].hasTarget
 
 		// Nothing this state can reach is still wanted.
 		if col.tiersFullFrom(hops) {
 			continue
 		}
 
-		for _, edge := range g.Adj[st.node] {
-			if inPath(st.path, edge.Dst) {
+		adj := g.Adj[arena.node(cur)]
+		for j := range adj {
+			edge := &adj[j]
+			if arena.visits(cur, edge.Dst) {
 				continue
 			}
 
-			newHasTarget := st.hasTarget || acSet[edge.Aircraft]
+			newHasTarget := hasTarget || acSet[edge.Aircraft]
 
 			if edge.Dst == dst {
-				// Skip before copying: either the path does not qualify, or its
-				// tier is full and truncation was already flagged when it filled.
+				// Skip before materialising: either the path does not qualify, or
+				// its tier is full and truncation was already flagged when it filled.
 				if !newHasTarget || col.tierFull(hops) {
 					continue
 				}
-				newPath, newEdges := extend(st.path, st.edges, edge)
-				if col.add(newPath, newEdges) {
+				if col.add(arena.route(cur, edge)) {
 					break walk
 				}
 				continue
@@ -69,13 +64,7 @@ walk:
 			if hops >= maxHops || col.tiersFullFrom(hops+1) {
 				continue
 			}
-			newPath, newEdges := extend(st.path, st.edges, edge)
-			queue = append(queue, bfsIncState{
-				node:      edge.Dst,
-				path:      newPath,
-				edges:     newEdges,
-				hasTarget: newHasTarget,
-			})
+			arena.push(cur, edge, newHasTarget)
 		}
 	}
 
@@ -96,52 +85,44 @@ func (g *Graph) FindRoutesFromInclusive(ctx context.Context, src string, aircraf
 		acSet[c] = true
 	}
 
-	queue := make([]bfsIncState, 0, 1024)
-	queue = append(queue, bfsIncState{node: src, path: []string{src}})
+	arena := newPathArena(src, 1024)
 	col := newRouteCollector(maxHops)
 
 walk:
-	for i := 0; i < len(queue); i++ {
+	for i := 0; i < len(arena.states); i++ {
 		if i%ctxCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
 			}
 		}
-		st := queue[i]
-		hops := len(st.path) - 1
+		cur := int32(i)
+		hops := int(arena.states[i].hops)
+		hasTarget := arena.states[i].hasTarget
 
 		if col.tiersFullFrom(hops) {
 			continue
 		}
 
-		for _, edge := range g.Adj[st.node] {
-			if inPath(st.path, edge.Dst) {
+		adj := g.Adj[arena.node(cur)]
+		for j := range adj {
+			edge := &adj[j]
+			if arena.visits(cur, edge.Dst) {
 				continue
 			}
 
-			newHasTarget := st.hasTarget || acSet[edge.Aircraft]
+			newHasTarget := hasTarget || acSet[edge.Aircraft]
 
 			// A qualifying child is a result in tier `hops`; any child may still
 			// be worth descending from, since a later leg can supply the match.
-			wantResult := newHasTarget && !col.tierFull(hops)
-			canDescend := hops < maxHops && !col.tiersFullFrom(hops+1)
-			if !wantResult && !canDescend {
-				continue
-			}
-
-			newPath, newEdges := extend(st.path, st.edges, edge)
-			if wantResult {
-				if col.add(newPath, newEdges) {
+			// Adding a result fills only tier `hops`, so it cannot change whether
+			// the deeper tiers are still open.
+			if newHasTarget && !col.tierFull(hops) {
+				if col.add(arena.route(cur, edge)) {
 					break walk
 				}
 			}
-			if canDescend {
-				queue = append(queue, bfsIncState{
-					node:      edge.Dst,
-					path:      newPath,
-					edges:     newEdges,
-					hasTarget: newHasTarget,
-				})
+			if hops < maxHops && !col.tiersFullFrom(hops+1) {
+				arena.push(cur, edge, newHasTarget)
 			}
 		}
 	}
