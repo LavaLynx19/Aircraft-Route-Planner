@@ -1,7 +1,8 @@
 import csv
 import os
-from neo4j import GraphDatabase
+
 from config import neo4j_config
+from neo4j import GraphDatabase
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 BATCH_SIZE = 500
@@ -23,11 +24,13 @@ def parse_planes(filepath):
             # Skip entries with no IATA code
             if not iata or iata == "\\N":
                 continue
-            aircraft.append({
-                "iata": iata,
-                "icao": icao if icao != "\\N" else None,
-                "name": name if name != "\\N" else None,
-            })
+            aircraft.append(
+                {
+                    "iata": iata,
+                    "icao": icao if icao != "\\N" else None,
+                    "name": name if name != "\\N" else None,
+                }
+            )
     return aircraft
 
 

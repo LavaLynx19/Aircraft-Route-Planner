@@ -15,7 +15,10 @@ def haversine(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
     return R * 2 * math.asin(math.sqrt(a))
 
 
@@ -60,17 +63,19 @@ def parse_routes(filepath, airport_coords):
                 ac_code = ac_code.strip()
                 if not ac_code:
                     continue
-                routes.append({
-                    "src": src,
-                    "dst": dst,
-                    "aircraft": ac_code,
-                    # '' not None: airline is part of the MERGE pattern below and
-                    # Neo4j rejects MERGE on a null property, which would abort the
-                    # whole batch on a single bad row. Matches the sentinel the
-                    # OpenSky loader already uses (ingest/sources/load_graph.py).
-                    "airline": airline if airline != "\\N" else "",
-                    "distance_km": distance_km,
-                })
+                routes.append(
+                    {
+                        "src": src,
+                        "dst": dst,
+                        "aircraft": ac_code,
+                        # '' not None: airline is part of the MERGE pattern below and
+                        # Neo4j rejects MERGE on a null property, which would abort the
+                        # whole batch on a single bad row. Matches the sentinel the
+                        # OpenSky loader already uses (ingest/sources/load_graph.py).
+                        "airline": airline if airline != "\\N" else "",
+                        "distance_km": distance_km,
+                    }
+                )
 
     print(f"  Skipped {skipped} routes (missing airports or equipment).")
     return routes
@@ -80,7 +85,9 @@ def load_airport_coords(driver):
     """Fetch airport coordinates from Neo4j for Haversine computation."""
     coords = {}
     with driver.session() as session:
-        result = session.run("MATCH (a:Airport) RETURN a.iata AS iata, a.lat AS lat, a.lon AS lon")
+        result = session.run(
+            "MATCH (a:Airport) RETURN a.iata AS iata, a.lat AS lat, a.lon AS lon"
+        )
         for record in result:
             coords[record["iata"]] = (record["lat"], record["lon"])
     return coords
@@ -99,7 +106,9 @@ def load_routes(driver):
             batch = routes[i : i + BATCH_SIZE]
             session.execute_write(_merge_batch, batch)
             if (i // BATCH_SIZE) % 5 == 0:
-                print(f"  ... merged {min(i + BATCH_SIZE, len(routes))}/{len(routes)} routes")
+                print(
+                    f"  ... merged {min(i + BATCH_SIZE, len(routes))}/{len(routes)} routes"
+                )
 
     print(f"  Merged {len(routes)} ROUTE relationships into Neo4j.")
     return len(routes)

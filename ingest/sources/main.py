@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Staging pipeline orchestrator (Phase 6.2) — targets STAGING Neo4j only.
 
 Run: python ingest/sources/main.py          (from repo root, staging Neo4j up)
@@ -8,6 +7,7 @@ fetch/load commands. Flight fetching runs separately (daily, launchd):
     python ingest/sources/fetch_flights.py
     python ingest/sources/load_graph.py
 """
+
 import os
 import sys
 import time
@@ -30,8 +30,12 @@ from normalize_aircraft import normalize_aircraft
 def print_summary(driver) -> None:
     with driver.session() as session:
         airports = session.run("MATCH (a:Airport) RETURN count(a) AS c").single()["c"]
-        aircraft = session.run("MATCH (ac:Aircraft) RETURN count(ac) AS c").single()["c"]
-        routes = session.run("MATCH ()-[r:ROUTE]->() RETURN count(r) AS c").single()["c"]
+        aircraft = session.run("MATCH (ac:Aircraft) RETURN count(ac) AS c").single()[
+            "c"
+        ]
+        routes = session.run("MATCH ()-[r:ROUTE]->() RETURN count(r) AS c").single()[
+            "c"
+        ]
     print("\n--- Staging summary ---")
     print(f"  Airports:  {airports}")
     print(f"  Aircraft:  {aircraft}")
@@ -66,7 +70,9 @@ def main() -> None:
         print(f"\nStaging setup complete in {time.time() - start:.1f}s.")
         print_summary(driver)
         print("\nNext: python ingest/sources/fetch_flights.py   (daily via launchd)")
-        print("Then: python ingest/sources/load_graph.py       (after data accumulates)")
+        print(
+            "Then: python ingest/sources/load_graph.py       (after data accumulates)"
+        )
     finally:
         driver.close()
 

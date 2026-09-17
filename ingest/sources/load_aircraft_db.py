@@ -7,6 +7,7 @@ frozen ADS-B Exchange list (ARCHITECTURE.md §13.1).
 
 CSV format (semicolon-separated, gzipped): icao24;registration;icaotype;dbFlags;...
 """
+
 import csv
 import gzip
 import os
@@ -20,7 +21,9 @@ def download(refresh: bool = False) -> None:
     if os.path.exists(AIRCRAFT_DB_CSV) and not refresh:
         return
     print(f"  Downloading {AIRCRAFT_DB_URL} ...")
-    req = urllib.request.Request(AIRCRAFT_DB_URL, headers={"User-Agent": "aircraft-route-planner"})
+    req = urllib.request.Request(
+        AIRCRAFT_DB_URL, headers={"User-Agent": "aircraft-route-planner"}
+    )
     with urllib.request.urlopen(req) as resp, open(AIRCRAFT_DB_CSV, "wb") as f:
         f.write(resp.read())
 
@@ -38,7 +41,11 @@ def load_aircraft_types(conn: sqlite3.Connection) -> int:
         for row in csv.reader(f, delimiter=";"):
             if len(row) < 3:
                 continue
-            icao24, reg, icaotype = row[0].strip().lower(), row[1].strip(), row[2].strip()
+            icao24, reg, icaotype = (
+                row[0].strip().lower(),
+                row[1].strip(),
+                row[2].strip(),
+            )
             if len(icao24) != 6 or not icaotype:
                 continue
             rows.append((icao24, icaotype.upper(), reg or None))

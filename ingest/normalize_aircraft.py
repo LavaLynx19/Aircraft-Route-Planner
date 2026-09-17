@@ -1,8 +1,9 @@
 import json
 import os
 import re
-from neo4j import GraphDatabase
+
 from config import neo4j_config
+from neo4j import GraphDatabase
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 ALIASES_FILE = os.path.join(DATA_DIR, "aircraft_aliases.json")
@@ -63,11 +64,20 @@ def build_aliases(iata, icao, name):
         aliases.add(icao)
     if name:
         # Add name without manufacturer prefix
-        for prefix in ("Airbus ", "Boeing ", "Embraer ", "Bombardier ",
-                        "Aerospatiale/Alenia ", "De Havilland ", "BAe ",
-                        "McDonnell Douglas ", "Fokker ", "Saab "):
+        for prefix in (
+            "Airbus ",
+            "Boeing ",
+            "Embraer ",
+            "Bombardier ",
+            "Aerospatiale/Alenia ",
+            "De Havilland ",
+            "BAe ",
+            "McDonnell Douglas ",
+            "Fokker ",
+            "Saab ",
+        ):
             if name.startswith(prefix):
-                stripped = name[len(prefix):]
+                stripped = name[len(prefix) :]
                 aliases.add(stripped)
                 break
     return list(aliases)
@@ -83,7 +93,9 @@ def normalize_aircraft(driver):
 
     # Fetch all aircraft from Neo4j
     with driver.session() as session:
-        result = session.run("MATCH (ac:Aircraft) RETURN ac.iata AS iata, ac.icao AS icao, ac.name AS name")
+        result = session.run(
+            "MATCH (ac:Aircraft) RETURN ac.iata AS iata, ac.icao AS icao, ac.name AS name"
+        )
         aircraft = [record.data() for record in result]
 
     print(f"  Normalizing {len(aircraft)} aircraft...")
@@ -105,11 +117,13 @@ def normalize_aircraft(driver):
             if "aliases" in ov:
                 aliases = list(set(aliases + ov["aliases"]))
 
-        updates.append({
-            "iata": iata,
-            "family": family,
-            "aliases": aliases,
-        })
+        updates.append(
+            {
+                "iata": iata,
+                "family": family,
+                "aliases": aliases,
+            }
+        )
 
     # Batch update
     with driver.session() as session:

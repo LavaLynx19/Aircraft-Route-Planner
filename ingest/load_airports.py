@@ -1,7 +1,8 @@
 import csv
 import os
-from neo4j import GraphDatabase
+
 from config import neo4j_config
+from neo4j import GraphDatabase
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 BATCH_SIZE = 1000
@@ -36,15 +37,17 @@ def parse_airports(filepath):
             except (ValueError, IndexError):
                 continue
 
-            airports.append({
-                "iata": iata,
-                "icao": row[5].strip() if row[5].strip() != "\\N" else None,
-                "name": row[1].strip() if row[1].strip() != "\\N" else None,
-                "city": row[2].strip() if row[2].strip() != "\\N" else None,
-                "country": row[3].strip() if row[3].strip() != "\\N" else None,
-                "lat": lat,
-                "lon": lon,
-            })
+            airports.append(
+                {
+                    "iata": iata,
+                    "icao": row[5].strip() if row[5].strip() != "\\N" else None,
+                    "name": row[1].strip() if row[1].strip() != "\\N" else None,
+                    "city": row[2].strip() if row[2].strip() != "\\N" else None,
+                    "country": row[3].strip() if row[3].strip() != "\\N" else None,
+                    "lat": lat,
+                    "lon": lon,
+                }
+            )
     return airports
 
 

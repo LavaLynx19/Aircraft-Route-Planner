@@ -6,6 +6,7 @@ the Aviationstack /airlines fallback is dead (403 on free tier, tested
 
 Format: id,name,alias,iata,icao,callsign,country,active
 """
+
 import csv
 import json
 import os
