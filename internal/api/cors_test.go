@@ -15,9 +15,9 @@ import (
 //
 // The CORS middleware wraps every route, so any path exercises it — but it must
 // be one that never reaches the Neo4j driver, because newFixtureServer passes
-// nil for it. /health does touch the driver (VerifyConnectivity) and nil-panics;
-// /routes with no parameters returns 400 MISSING_PARAM first, with the header
-// already set by the middleware.
+// nil for it. /routes with no parameters returns 400 MISSING_PARAM first, with
+// the header already set by the middleware. (/health tolerates a nil driver too,
+// but only by reporting the database as degraded — not a normal path to probe.)
 const corsProbePath = "/routes"
 
 func originFor(t *testing.T, srv *Server) string {

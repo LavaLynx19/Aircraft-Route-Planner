@@ -630,11 +630,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Counted once at load, not rescanned per request (2026-07-05 review L3).
 	edgeCount := s.graph.EdgeCount
 
-	neo4jOK := true
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	if err := s.driver.VerifyConnectivity(ctx); err != nil {
-		neo4jOK = false
+	// A nil driver means the server was built without Neo4j — test fixtures do
+	// this — so report the database as unreachable rather than panicking.
+	neo4jOK := s.driver != nil
+	if neo4jOK {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.driver.VerifyConnectivity(ctx); err != nil {
+			neo4jOK = false
+		}
 	}
 
 	status := "ok"
