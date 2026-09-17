@@ -1,11 +1,12 @@
 // Resolves IATA equipment codes (as returned by the API in leg.aircraft) to
 // SVG silhouettes. Looks up in this order:
-//   1. the generated bundle at /assets/aircraft_shapes.json (tar1090 / RexKramer1
-//      top-down silhouettes from tools/build_shapes.py)
+//   1. the generated bundle at /assets/aircraft_shapes.json (tools/build_shapes.py):
+//      IATA → ICAO type → the tar1090 top-down shape tar1090 itself would draw
+//      for that type
 //   2. BUILTIN_SHAPES below — three hand-tuned silhouettes (narrow, wide-twin,
-//      quad) so the map shows real plane shapes even when build_shapes.py hasn't
-//      populated the shapes table.
-//   3. a generic plane silhouette fallback.
+//      quad) so the map shows real plane shapes when the bundle is missing or has
+//      no shape for the type.
+//   3. the bundle's default shape, else a generic plane silhouette.
 
 // Hand-tuned silhouettes — north-up, fuselage runs along the Y axis. The
 // fill="currentColor" hook lets map.js swap in the target / non-target color.
@@ -68,6 +69,13 @@ const FAMILY_FALLBACKS = {
   '787': '789',
 };
 
+// tar1090 draws a standard airliner 32px wide. Bundle shape dimensions and
+// per-type scales are relative to that, so dividing by it keeps aircraft sizes in
+// proportion at whatever marker size the map uses.
+const TAR1090_BASE_PX = 32;
+
+const EMPTY = { shapes: {}, icaoToShape: {}, iataToIcao: {}, defaultShape: null };
+
 let cached = null;
 
 async function load() {
@@ -78,11 +86,15 @@ async function load() {
     const data = await resp.json();
     cached = {
       shapes: data.shapes || {},
+      icaoToShape: data.icaoToShape || {},
       iataToIcao: data.iataToIcao || {},
-      default: data.default || GENERIC_PLANE_SVG,
+      defaultShape: data.defaultShape || null,
     };
   } catch (e) {
-    cached = { shapes: {}, iataToIcao: {}, default: GENERIC_PLANE_SVG };
+    // Built-in silhouettes still work, but say so: a silently empty bundle is how
+    // the map once ran on fallback icons without anyone noticing.
+    console.warn('aircraft shape bundle unavailable, using built-in silhouettes:', e);
+    cached = EMPTY;
   }
   return cached;
 }
@@ -103,21 +115,38 @@ export function resolveICAO(iataCode) {
   return lookupICAO(cached, iataCode);
 }
 
-// Returns { svg: string, rotate: bool, icao: string|null } for an IATA leg.aircraft code.
+function fromBundle(data, name, scale) {
+  const shape = name ? data.shapes[name] : null;
+  if (!shape || !shape.svg) return null;
+  return {
+    svg: shape.svg,
+    rotate: !shape.noRotate,
+    width: (shape.w * scale) / TAR1090_BASE_PX,
+    height: (shape.h * scale) / TAR1090_BASE_PX,
+  };
+}
+
+// Returns { svg, rotate, icao, width, height } for an IATA leg.aircraft code.
+// width and height are multiples of the standard marker size.
 export function shapeFor(iataCode) {
-  const data = cached || { shapes: {}, iataToIcao: {}, default: GENERIC_PLANE_SVG };
+  const data = cached || EMPTY;
   const icao = lookupICAO(data, iataCode);
   if (icao) {
-    const fromJson = data.shapes[icao];
-    if (fromJson && fromJson.svg) {
-      return { svg: fromJson.svg, rotate: !fromJson.noRotate, icao };
+    const ref = data.icaoToShape[icao];
+    const bundled = ref ? fromBundle(data, ref[0], ref[1]) : null;
+    if (bundled) {
+      return { ...bundled, icao };
     }
     const builtin = BUILTIN_SHAPES[icao];
     if (builtin) {
-      return { svg: builtin.svg, rotate: true, icao };
+      return { svg: builtin.svg, rotate: true, icao, width: 1, height: 1 };
     }
   }
-  return { svg: data.default, rotate: true, icao };
+  const fallback = fromBundle(data, data.defaultShape, 1);
+  if (fallback) {
+    return { ...fallback, icao };
+  }
+  return { svg: GENERIC_PLANE_SVG, rotate: true, icao, width: 1, height: 1 };
 }
 
 export async function ensureLoaded() {

@@ -190,24 +190,25 @@ function iconTForLeg(shares, leg, routeIdx) {
 }
 
 function aircraftIcon(iataCode, bearingDeg, isTarget) {
-  const { svg, rotate } = shapeFor(iataCode);
-  // Most top-down silhouettes point "up" (north). Subtract 0 to align with bearing.
-  // Generic arrow uses viewBox -12..12 with nose at y=-10, so bearing rotation
-  // already aligns it correctly (north-pointing).
+  const { svg, rotate, width, height } = shapeFor(iataCode);
+  // Silhouettes are drawn nose-up (north), so rotating by the leg's bearing points
+  // them along it. Size follows the aircraft: shapeFor scales each type relative to
+  // the standard marker, as tar1090 does, so an A380 draws larger than a Dash 8.
   const rot = rotate ? bearingDeg : 0;
   const color = isTarget ? '#2563eb' : '#6b7280';
-  const dim = ICON_PX;
+  const w = Math.round(ICON_PX * width);
+  const h = Math.round(ICON_PX * height);
   // Force fill via inline replacement so the marker renders even if `color`
   // inheritance is broken by Leaflet's marker CSS chain.
   const colored = svg
     .replace(/fill="currentColor"/g, `fill="${color}"`)
-    .replace(/<svg /, `<svg width="${dim}" height="${dim}" `);
-  const html = `<div class="aircraft-marker-wrap" style="transform:rotate(${rot}deg);width:${dim}px;height:${dim}px;">${colored}</div>`;
+    .replace(/<svg /, `<svg width="${w}" height="${h}" `);
+  const html = `<div class="aircraft-marker-wrap" style="transform:rotate(${rot}deg);width:${w}px;height:${h}px;">${colored}</div>`;
   return L.divIcon({
     className: 'aircraft-marker',
     html,
-    iconSize: [dim, dim],
-    iconAnchor: [dim / 2, dim / 2],
+    iconSize: [w, h],
+    iconAnchor: [w / 2, h / 2],
   });
 }
 

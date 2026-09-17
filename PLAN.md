@@ -182,6 +182,7 @@ Status markers per `.claude/rules/design-plan-checklist.md`: `[x]` done · `[ ]`
     - `<img onerror="this.remove()">` gracefully drops the image when the BMP is absent
   - **Build:** `tools/build_shapes.py` — fetches all three upstream sources, queries Neo4j for IATA→ICAO, writes `aircraft_shapes.json` + extracts `Silhouettes.zip` to `details/`. Idempotent.
   - **Attribution:** generated `web/public/assets/aircraft/ATTRIBUTION.md` lists upstream URLs and bundle stats; merged asset set is GPL-3.0, Go/Python code unaffected.
+  - **Superseded 2026-09-16 (6.18):** tar1090 no longer publishes `aircraft_shapes.js`, so no top-down shape had been bundled. The bundle is now built from tar1090 `markers.js` with tar1090's own type → shape rules, `RexKramer1/AircraftShapesSVG` is dropped, and `shapes.js` reads `icaoToShape` (ARCHITECTURE.md §11.4)
 - [x] **Route results sidebar** (`web/src/sidebar.js`):
   - List of returned routes with hop count, total distance, per-leg breakdown
   - Each leg row: top-down silhouette + aircraft IATA + airline + distance
@@ -778,13 +779,10 @@ Sep M4, M5, L7 plus the launchd late-fire found in 6.6. **Verified:** ruff clean
       currently reflect one 12-hour window only
       → defer until: the first sweep completes (~2026-09-28), then re-check that half 1 is selected
 
-**Remaining after batch 9** (updated 2026-09-15): batch 10 → 6.15, Jul S8 → 6.16, the 6.8
-redesign (done 2026-09-15). Still open beyond those: Jul M5 partials (full-name alias, `AliasToIATA` case-folding — 6.10's
-deferrals), Jul S3 remainder (`haversine.go`/`loader.go` untested), Sep M6 (static source partition),
-and batch 11 — **17 ruff errors / 11 unformatted files** across `ingest/` and `tools/`, plus the
-`/health` nil-driver panic. **New 2026-09-14:** `web/public/assets/aircraft/ATTRIBUTION.md` reports
-**0 top-down silhouette shapes** — the tar1090 fetch in `tools/build_shapes.py` appears to yield nothing,
-so map icons likely all fall back to the default.
+**Remaining after batch 9** (updated 2026-09-16): batch 10 → 6.15, Jul S8 → 6.16, the 6.8 redesign
+(done 2026-09-15), batch 11 → 6.18. Still open beyond those: Jul M5 partials (full-name alias,
+`AliasToIATA` case-folding — 6.10's deferrals) and Sep M6 (static source partition), which needs an
+architecture discussion rather than a patch.
 
 ---
 
@@ -840,6 +838,46 @@ put interpolated identifiers into SQL; S6 splits into two single-purpose package
 - [x] `data_planning/` stays private. Its three research notes are summarised in ARCHITECTURE.md §13.1–13.3
       and the two code reviews explained in §13.4; every reference in README, PLAN, ARCHITECTURE and four
       ingest docstrings now points there
+
+---
+
+#### 6.18 Review-Findings Batch 11 — Lint Debt, Test Gaps, Fetch Agents, Map Icons (2026-09-16)
+
+Batch 11 as planned (ruff debt, the `/health` nil driver, the Jul S3 remainder), plus two faults found
+while checking it: the scheduled jobs had stopped, and the map had been drawing fallback icons.
+
+- [x] **Lint** — 17 ruff errors and 10 unformatted files across `ingest/` and `tools/` → 0 and 0. Import
+      order autofixed. The 3 shebangs were removed rather than the files made executable: every
+      documented invocation is `python3 <path>`, and `env python3` would pick whatever interpreter is
+      first on `PATH` over the CLT 3.9 the agents need. `tools/build_shapes.py`'s blind excepts went
+      with its rewrite (below). Formatting verified behaviour-neutral by AST comparison: only the 5
+      import-reordered files differ, and only in import order
+- [x] **`/health` nil driver** — reports `neo4j_ok: false` and `status: degraded` instead of panicking
+      (`TestHealthWithoutDriverReportsDegraded`). Production always has a driver, so it is unchanged there
+- [x] **Jul S3 remainder** — `haversine_test.go` (exact great-circle fractions, symmetry, antimeridian)
+      and `loader_integration_test.go`, which runs `LoadGraph` against a real Neo4j and checks edge
+      endpoints, `EdgeCount`, the `stale` filter against a live count, `ByCountry`/`Countries`, and
+      `AliasToIATA`/`Families`. Skipped without `NEO4J_PASSWORD` or under `-short`; passed against staging
+      (53,430 edges) and production (92,451)
+- [x] **Fetch agents repointed** — all three launchd jobs failed on 2026-09-15 with exit 78: their plists
+      still named `~/Desktop/Antigravity/…` after the repo moved. Plists repointed and reloaded (they live
+      outside the repo; RUNBOOK §4 now documents the failure and the fix). The 2026-09-16 09:00, 10:00 and
+      11:00 runs then succeeded unattended. A recovery kickstart on 2026-09-15 restored the AeroDataBox
+      day (monthly quota) but not the OpenSky one: its rolling 24h credits left the next morning's run
+      only 2 airports, exactly as RUNBOOK §4 already warned
+- [x] **Map icons** — no top-down shape had been bundled since tar1090 retired `aircraft_shapes.js`; the
+      build logged the 404 and exited 0. `build_shapes.py` now reads `markers.js` and applies tar1090's
+      own type → shape rules, with Mictronics type descriptions for types not listed by designator;
+      `iataToIcao` reads both graphs plus 22 sourced IATA variant codes; `RexKramer1/AircraftShapesSVG`
+      is dropped (its repo layout changed, and every served type already resolves); a failed source now
+      aborts the build. Icons size by aircraft. Verified against tar1090's `getBaseMarker` and
+      `svgShapeToSVG` executed from `markers.js` (261 lookups, 0 mismatches) and by rendering the 25
+      shapes in use: staging 100% type-specific, production 93%
+- [>] IATA group codes (`CRJ`, `ERJ`, `DH8`, `M80`, `32S`, … — 32 codes on 6,464 production edges) draw the
+      default icon: each names a family, and no source consulted maps them → defer until: Phase 6.4
+      production cut-over, which retires the OpenFlights data that carries them (staging has none)
+- [x] Verify: Go build, vet and tests green, `gofmt -l` silent; `ruff check` and `ruff format --check`
+      clean across `ingest/` and `tools/`; all tracked Python compiles on CLT 3.9.6; 109 pytest pass
 
 ---
 

@@ -180,6 +180,39 @@ System Settings → Privacy & Security → Full Disk Access → + → Cmd+Shift+
 An Xcode Command Line Tools major bump can move that 3.9 framework path and re-break the grant.
 The staleness check below is what catches it.
 
+### Moving the project directory — the plists hold absolute paths
+
+All three plists name the script, `WorkingDirectory` and both log paths absolutely. Move or rename the
+repo and every job fails before Python starts: `launchctl list` shows last exit **78** (`EX_CONFIG`),
+and nothing reaches the logs, because they point at the old location too. The cause is only in the
+system log:
+
+```bash
+log show --last 24h --style compact \
+  --predicate 'eventMessage CONTAINS "aircraft-route-planner"' | grep -i 'could not initialize'
+# … Service could not initialize: Unable to set current working directory. path = <old path>
+```
+
+This happened when the repo moved from `~/Desktop/Antigravity/` to `~/Desktop/My Projects/`: every
+2026-09-15 run was lost. Full Disk Access did **not** need re-granting — the grant is keyed to the
+interpreter binary, which did not move, and the 2026-09-16 runs then succeeded unattended.
+
+Repoint the four path-bearing keys in each plist and reload it. The three string keys take a plain
+`plutil -replace`:
+
+```bash
+P=~/Library/LaunchAgents/com.aircraft-route-planner.fetch.plist
+plutil -replace WorkingDirectory  -string "<repo>/ingest/sources"        "$P"
+plutil -replace StandardOutPath   -string "<repo>/ingest/data/fetch.log" "$P"
+plutil -replace StandardErrorPath -string "<repo>/ingest/data/fetch.log" "$P"
+```
+
+`ProgramArguments` needs care: `plutil -replace ProgramArguments.1 -string <script>` **inserts** at
+index 1 instead of overwriting, leaving the old path as a third argument (observed 2026-09-15; harmless
+only because the scripts ignore arguments). Follow it with `plutil -remove ProgramArguments.2`, check
+with `plutil -p "$P"` that exactly two arguments remain, then `launchctl unload "$P"` and
+`launchctl load "$P"`. Unload stops a job that is mid-run, so wait for a running job to finish first.
+
 ### Verifying the job — a shell run proves nothing
 
 `python3 ingest/sources/fetch_flights.py` in Terminal succeeds regardless of TCC, because
@@ -212,6 +245,11 @@ Note a kickstart spends the day's ~3,750 credits, and OpenSky's quota is not cal
 aligned — it rolls off ~24h after each spend. A manual kickstart therefore pushes the next
 scheduled run inside that shadow and can make it come back `UNPRODUCTIVE`; this happened on
 2026-09-03. Prefer letting the 09:00 run do its thing over kickstarting.
+
+It recurred on 2026-09-15: a kickstart at 23:11 local, meant to recover a day lost to a moved project
+directory (see above), left the next morning's run just 2 airports before the credit floor. A missed
+OpenSky day cannot be bought back, only moved. AeroDataBox is different — its quota is monthly, so a
+recovery run there does restore the missed day.
 
 ### Staleness check — has the cache stopped growing?
 
