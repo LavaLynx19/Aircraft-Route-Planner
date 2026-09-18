@@ -902,10 +902,11 @@ together with flipping the half after an empty window.
       clean. Not run: the new tests against the pre-fix code (declined)
 - [x] Live queue, read-only: the next 19 airports are unchanged; the full queue gains UNEE on half 1,
       whose half-0 window came back empty on 2026-09-16
-- [ ] Verify live at the 2026-09-18 10:00 run, which executes this checked-out code: no bare
-      `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` lines, and airports that previously
-      logged one now record `empty`. A `JSONDecodeError (HTTP 200)` line would mean the empty bodies
-      were not all 204s, and the fix is incomplete
+- [x] **Verified live at the 2026-09-18 10:00 run** (04:34 UTC), which executed this code unattended:
+      **11 ok, 8 empty, 0 error**, and zero `JSONDecodeError` or `HTTP` lines in the log. Under the old
+      code those 8 would have been errors, so the empty bodies were all 204s and the fix is complete.
+      All 19 were first visits, so the half flip is not yet exercised in production — every logged visit
+      is still half 0, and the first flip lands when the sweep reaches its second pass (~2026-09-28)
 
 The 42 visits already recorded as `error` are left as recorded. Each such airport repeats that half once
 at its next turn, which costs the one unit any visit costs, then records whatever that window holds and
