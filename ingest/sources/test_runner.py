@@ -108,6 +108,7 @@ class TestSchedulesClassify:
         base = {
             "ok": 0,
             "queued": 19,
+            "empty": 0,
             "error": 0,
             "quota_exhausted": False,
             "monthly_remaining": 400,
@@ -133,3 +134,13 @@ class TestSchedulesClassify:
         outcome, detail = fetch_schedules.classify(self._stats(ok=0, error=19))
         assert outcome == "UNPRODUCTIVE"
         assert "19" in detail
+
+    def test_an_all_empty_run_still_alarms_and_says_so(self):
+        """19 airports with no departures at all is suspicious, not quiet.
+
+        The detail must separate empty windows from errors: they point at
+        different causes (an API or coverage change versus connectivity).
+        """
+        outcome, detail = fetch_schedules.classify(self._stats(ok=0, empty=19))
+        assert outcome == "UNPRODUCTIVE"
+        assert "19 empty, 0 errors" in detail

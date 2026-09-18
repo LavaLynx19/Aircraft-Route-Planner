@@ -70,7 +70,14 @@ produces only one log row, so `count(*)` reports less than was actually spent (c
 The schedules job reports `--- run OK: N units left this month ---`. Near the monthly ceiling it
 reports `run OK: monthly unit quota exhausted` and exits 0 — that is the **expected** end state
 each month, not a fault, so it deliberately does not alarm. An `UNPRODUCTIVE` exit from it means
-it had budget and still collected nothing, which is a real problem.
+it had budget and still collected nothing, which is a real problem; its detail line separates empty
+windows from errors, since they point at different causes.
+
+A window with no departures is `empty`, not an error: the API answers **HTTP 204** with no body.
+Before 2026-09-17 those were logged as `  <ICAO>: JSONDecodeError: Expecting value: line 1 column 1
+(char 0)` and recorded as errors, so old logs overstate the error rate. Error lines now carry the HTTP
+status when a response arrived — `JSONDecodeError (HTTP 200)` is a genuinely malformed body, while a
+line with no status is a network failure.
 
 ```bash
 tail -20 ingest/data/schedules.log                       # last schedules run
@@ -233,8 +240,9 @@ Each run prints `--- run started <ts> ---` and one of three outcomes:
 | `--- run FAILED: ... ---` | 1 | crashed; the exception is on the line |
 
 Indented `  <ICAO>: <ExceptionName>: <msg>` lines are per-airport network failures. A handful is
-normal transient noise — that airport is recorded `error` and retried next run, since
-resumability only skips `ok`. Many in one run points at connectivity or a bad credential, and
+normal transient noise. That airport is recorded `error`, and because a failed attempt still counts as
+a visit it is retried at its next turn in the queue rather than on the next run; `ok` and `empty` both
+mark its window collected. Many in one run points at connectivity or a bad credential, and
 if none succeed the run ends `UNPRODUCTIVE`.
 
 Both non-zero outcomes also raise a macOS notification. `UNPRODUCTIVE` exists because a

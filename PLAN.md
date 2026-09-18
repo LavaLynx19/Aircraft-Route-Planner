@@ -881,6 +881,38 @@ while checking it: the scheduled jobs had stopped, and the map had been drawing 
 
 ---
 
+#### 6.19 AeroDataBox Empty Windows (2026-09-17)
+
+Found while checking the scheduled jobs: 11 of 19 calls on 2026-09-17 were recorded as errors. Most were
+not faults. A window with no departures returns HTTP 204 with an empty body (documented in the API's
+OpenAPI spec for `GetAirportFlightsRelative`), and the fetcher parsed it as JSON. Approved 2026-09-17,
+together with flipping the half after an empty window.
+
+- [x] `fetch_departures` returns `empty` for HTTP 204. An unparseable body on any other status stays an
+      `error`, and error lines now carry `(HTTP n)` when a response arrived, so tomorrow's log can tell
+      a malformed body from a network failure
+- [x] `due_airports` flips the half after the newest `ok` **or** `empty` visit, matching the pair
+      `_window_resolved` already treats as collected; a failed visit still retries the same half.
+      ARCHITECTURE.md §4.1.5 amended
+- [x] `classify`'s `UNPRODUCTIVE` detail reports empty and error counts separately
+- [x] Tests: 5 response cases in `test_fetch.py` (204, 200 with departures, 200 with none, malformed 200,
+      network failure), 2 half-selection cases in `test_queue.py`, 1 all-empty classify case. The
+      batch-10 shortfall test needed its two setup rows a day apart: with `empty` now counting when
+      choosing the half, identical timestamps made that choice a tie. 117 pytest pass on CLT 3.9; ruff
+      clean. Not run: the new tests against the pre-fix code (declined)
+- [x] Live queue, read-only: the next 19 airports are unchanged; the full queue gains UNEE on half 1,
+      whose half-0 window came back empty on 2026-09-16
+- [ ] Verify live at the 2026-09-18 10:00 run, which executes this checked-out code: no bare
+      `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` lines, and airports that previously
+      logged one now record `empty`. A `JSONDecodeError (HTTP 200)` line would mean the empty bodies
+      were not all 204s, and the fix is incomplete
+
+The 42 visits already recorded as `error` are left as recorded. Each such airport repeats that half once
+at its next turn, which costs the one unit any visit costs, then records whatever that window holds and
+flips as normal.
+
+---
+
 ## Build Order (Commit Sequence)
 
 ```mermaid

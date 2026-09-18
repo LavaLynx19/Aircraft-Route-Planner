@@ -533,6 +533,16 @@ flights — and route discovery saturates fast: a single 12h window at ZSPD retu
 departures. Halving temporal coverage to double the sweep rate is the better trade here, and
 alternating the offset yields full-day coverage every ~46 days anyway.
 
+**What flips the half (amended 2026-09-17).** The next visit takes the other half after any
+*resolved* visit, meaning `ok` or `empty` — the same pair that marks a window as already collected. A
+failed visit collected nothing, so it retries the same half. A window with no departures comes back
+as HTTP **204 No Content** with an empty body, which the API's OpenAPI spec documents for this
+endpoint; that is an `empty` observation. Until 2026-09-17 the fetcher parsed that body as JSON,
+logged `JSONDecodeError` and recorded an `error`, and the half flipped only after `ok`. An airport
+whose sampled half was empty therefore re-queried that same half on every visit and never sampled
+the other one. 42 visits were recorded this way, concentrated in the small airports the queue
+reaches late (Uzbekistan: 12 errored visits, 0 successes).
+
 **Consequence for `weekly_frequency`.** AeroDataBox-sourced edges observe ~12 of every 24 hours,
 so the existing `sampled_days_by_origin` extrapolation (Section 4.1.3) under-counts them by
 roughly half. Frequency extrapolation must scale by *sampled hours*, not sampled days, for these
