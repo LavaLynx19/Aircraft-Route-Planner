@@ -1,5 +1,5 @@
-from neo4j import GraphDatabase
 from config import neo4j_config
+from neo4j import GraphDatabase
 
 CONSTRAINTS = [
     # Uniqueness constraints (also create indexes)

@@ -16,32 +16,24 @@ import (
 //
 // The same counters gate *expansion*, which is what lets the cap bound work and
 // not merely response size. A state that can only contribute to tiers which are
-// already full is never enqueued, and its path/edge copies are never made — those
-// copies are the dominant allocation. An earlier version relied instead on
-// breaking out once *every* tier filled, which benchmarks on 2026-09-13 showed to
-// be nearly unreachable: low tiers are naturally sparse (a pair may have exactly
-// one direct route), so a tier that can never reach the cap kept the walk running
-// to exhaustion.
+// already full is never enqueued. An earlier version relied instead on breaking
+// out once *every* tier filled, which benchmarks on 2026-09-13 showed to be nearly
+// unreachable: low tiers are naturally sparse (a pair may have exactly one direct
+// route), so a tier that can never reach the cap kept the walk running to
+// exhaustion.
 //
-// The benefit is uneven and worth knowing before optimising further. For the
-// destination-less variants every child is a candidate result, tiers fill fast and
-// gating engages early (~74x faster, ~100x fewer allocations at maxHops=3). For
+// Gating helps unevenly. For the destination-less variants every child is a
+// candidate result, tiers fill fast and gating engages early. For
 // destination-seeking queries a tier fills only on a destination hit, which is
-// rare, so gating engages late: ~7x faster with allocation volume essentially
-// unchanged. What remains there is the per-state copying in extend, not the cap.
-// See ARCHITECTURE.md §8.2 for the measured figures.
+// rare, so gating engages late and most states are still created — which is why a
+// state is made cheap to create (see pathState) rather than relying on gating
+// alone. See ARCHITECTURE.md §8.2 for the measured figures.
 const MaxRoutesPerHopTier = 250
 
 // ctxCheckInterval is how many dequeues pass between cancellation checks. The
 // check is cheap but not free and this is the hot loop, so it is sampled rather
 // than run on every state.
 const ctxCheckInterval = 256
-
-type bfsState struct {
-	node  string
-	path  []string
-	edges []Edge
-}
 
 // routeCollector accumulates results under the per-hop-tier cap and answers the
 // questions the traversals use to prune.
@@ -73,7 +65,7 @@ func (c *routeCollector) tierFull(tier int) bool {
 // A state at hop depth h yields a destination match in tier h, and each further
 // descent lands one tier deeper, so its reachable tiers are exactly h..maxHops.
 // The loop runs over at most maxHops+1 <= 4 entries (hops are capped at 3), which
-// is far cheaper than the slice copies it avoids.
+// is far cheaper than the states it avoids creating.
 func (c *routeCollector) tiersFullFrom(tier int) bool {
 	if tier < 0 {
 		tier = 0
@@ -89,10 +81,10 @@ func (c *routeCollector) tiersFullFrom(tier int) bool {
 // add records a route unless its hop tier is already full. It reports whether
 // every tier is now saturated, meaning the caller should stop walking entirely.
 //
-// Callers check tierFull before building the copies add needs, so the rejection
-// path here is a safety net rather than the normal route to truncation.
-func (c *routeCollector) add(path []string, edges []Edge) (allFull bool) {
-	tier := len(edges) - 1
+// Callers check tierFull before materialising the route, so the rejection path
+// here is a safety net rather than the normal route to truncation.
+func (c *routeCollector) add(r Route) (allFull bool) {
+	tier := len(r.Edges) - 1
 	if c.tierFull(tier) {
 		c.truncated = true
 		return c.saturated >= len(c.perTier)
@@ -108,7 +100,7 @@ func (c *routeCollector) add(path []string, edges []Edge) (allFull bool) {
 		c.saturated++
 		c.truncated = true
 	}
-	c.routes = append(c.routes, makeRoute(path, edges))
+	c.routes = append(c.routes, r)
 	return c.saturated >= len(c.perTier)
 }
 
@@ -140,41 +132,41 @@ func (g *Graph) FindRoutes(ctx context.Context, src, dst string, aircraftCodes [
 		acSet[c] = true
 	}
 
-	queue := make([]bfsState, 0, 256)
-	queue = append(queue, bfsState{node: src, path: []string{src}})
+	arena := newPathArena(src, 256)
 	col := newRouteCollector(maxHops)
 
 walk:
-	for i := 0; i < len(queue); i++ {
+	for i := 0; i < len(arena.states); i++ {
 		if i%ctxCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
 			}
 		}
-		st := queue[i]
-		hops := len(st.path) - 1
+		cur := int32(i)
+		hops := int(arena.states[i].hops)
 
 		// Nothing this state can reach is still wanted.
 		if col.tiersFullFrom(hops) {
 			continue
 		}
 
-		for _, edge := range g.Adj[st.node] {
+		adj := g.Adj[arena.node(cur)]
+		for j := range adj {
+			edge := &adj[j]
 			if !acSet[edge.Aircraft] {
 				continue
 			}
-			if inPath(st.path, edge.Dst) {
+			if arena.visits(cur, edge.Dst) {
 				continue
 			}
 
 			if edge.Dst == dst {
 				// Tier full: this result would be rejected, and truncation was
-				// already flagged when the tier filled. Skip before copying.
+				// already flagged when the tier filled. Skip before materialising.
 				if col.tierFull(hops) {
 					continue
 				}
-				newPath, newEdges := extend(st.path, st.edges, edge)
-				if col.add(newPath, newEdges) {
+				if col.add(arena.route(cur, edge)) {
 					break walk
 				}
 				continue
@@ -183,39 +175,12 @@ walk:
 			if hops >= maxHops || col.tiersFullFrom(hops+1) {
 				continue
 			}
-			newPath, newEdges := extend(st.path, st.edges, edge)
-			queue = append(queue, bfsState{
-				node:  edge.Dst,
-				path:  newPath,
-				edges: newEdges,
-			})
+			arena.push(cur, edge, false)
 		}
 	}
 
 	sortRoutes(col.routes)
 	return col.routes, col.truncated, nil
-}
-
-// extend copies a path and edge list with one more hop appended. These copies are
-// the dominant allocation in every traversal, which is why callers prune before
-// reaching here rather than after.
-func extend(path []string, edges []Edge, edge Edge) ([]string, []Edge) {
-	newPath := make([]string, len(path)+1)
-	copy(newPath, path)
-	newPath[len(path)] = edge.Dst
-	newEdges := make([]Edge, len(edges)+1)
-	copy(newEdges, edges)
-	newEdges[len(edges)] = edge
-	return newPath, newEdges
-}
-
-func inPath(path []string, node string) bool {
-	for _, p := range path {
-		if p == node {
-			return true
-		}
-	}
-	return false
 }
 
 // FindRoutesFrom performs strict BFS with no destination: every reachable airport
@@ -231,52 +196,43 @@ func (g *Graph) FindRoutesFrom(ctx context.Context, src string, aircraftCodes []
 		acSet[c] = true
 	}
 
-	queue := make([]bfsState, 0, 256)
-	queue = append(queue, bfsState{node: src, path: []string{src}})
+	arena := newPathArena(src, 256)
 	col := newRouteCollector(maxHops)
 
 walk:
-	for i := 0; i < len(queue); i++ {
+	for i := 0; i < len(arena.states); i++ {
 		if i%ctxCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
 			}
 		}
-		st := queue[i]
-		hops := len(st.path) - 1
+		cur := int32(i)
+		hops := int(arena.states[i].hops)
 
 		if col.tiersFullFrom(hops) {
 			continue
 		}
 
-		for _, edge := range g.Adj[st.node] {
+		adj := g.Adj[arena.node(cur)]
+		for j := range adj {
+			edge := &adj[j]
 			if !acSet[edge.Aircraft] {
 				continue
 			}
-			if inPath(st.path, edge.Dst) {
+			if arena.visits(cur, edge.Dst) {
 				continue
 			}
 
 			// Every child is both a candidate result (tier `hops`) and possibly
-			// worth descending from. If neither applies, skip before copying.
-			wantResult := !col.tierFull(hops)
-			canDescend := hops < maxHops && !col.tiersFullFrom(hops+1)
-			if !wantResult && !canDescend {
-				continue
-			}
-
-			newPath, newEdges := extend(st.path, st.edges, edge)
-			if wantResult {
-				if col.add(newPath, newEdges) {
+			// worth descending from. Adding a result fills only tier `hops`, so it
+			// cannot change whether the deeper tiers are still open.
+			if !col.tierFull(hops) {
+				if col.add(arena.route(cur, edge)) {
 					break walk
 				}
 			}
-			if canDescend {
-				queue = append(queue, bfsState{
-					node:  edge.Dst,
-					path:  newPath,
-					edges: newEdges,
-				})
+			if hops < maxHops && !col.tiersFullFrom(hops+1) {
+				arena.push(cur, edge, false)
 			}
 		}
 	}

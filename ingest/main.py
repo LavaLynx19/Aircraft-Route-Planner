@@ -1,24 +1,29 @@
-#!/usr/bin/env python3
 """Aircraft Route Planner — Data Ingestion Pipeline.
 
 Populates Neo4j from OpenFlights CSV data.
 Run: python ingest/main.py
 """
+
 import time
-from neo4j import GraphDatabase
+
 from config import neo4j_config
 from constraints import create_constraints
 from load_aircraft import load_aircraft
-from normalize_aircraft import normalize_aircraft
 from load_airports import load_airports
 from load_routes import load_routes
+from neo4j import GraphDatabase
+from normalize_aircraft import normalize_aircraft
 
 
 def print_summary(driver):
     with driver.session() as session:
         airports = session.run("MATCH (a:Airport) RETURN count(a) AS c").single()["c"]
-        aircraft = session.run("MATCH (ac:Aircraft) RETURN count(ac) AS c").single()["c"]
-        routes = session.run("MATCH ()-[r:ROUTE]->() RETURN count(r) AS c").single()["c"]
+        aircraft = session.run("MATCH (ac:Aircraft) RETURN count(ac) AS c").single()[
+            "c"
+        ]
+        routes = session.run("MATCH ()-[r:ROUTE]->() RETURN count(r) AS c").single()[
+            "c"
+        ]
         a380 = session.run(
             "MATCH ()-[r:ROUTE {aircraft: '388'}]->() RETURN count(r) AS c"
         ).single()["c"]

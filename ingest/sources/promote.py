@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Phase 6.4 — promote the new-source pipeline to PRODUCTION Neo4j.
 
 Wipes production and re-ingests from the current sources: OurAirports

@@ -533,6 +533,16 @@ flights — and route discovery saturates fast: a single 12h window at ZSPD retu
 departures. Halving temporal coverage to double the sweep rate is the better trade here, and
 alternating the offset yields full-day coverage every ~46 days anyway.
 
+**What flips the half (amended 2026-09-17).** The next visit takes the other half after any
+*resolved* visit, meaning `ok` or `empty` — the same pair that marks a window as already collected. A
+failed visit collected nothing, so it retries the same half. A window with no departures comes back
+as HTTP **204 No Content** with an empty body, which the API's OpenAPI spec documents for this
+endpoint; that is an `empty` observation. Until 2026-09-17 the fetcher parsed that body as JSON,
+logged `JSONDecodeError` and recorded an `error`, and the half flipped only after `ok`. An airport
+whose sampled half was empty therefore re-queried that same half on every visit and never sampled
+the other one. 42 visits were recorded this way, concentrated in the small airports the queue
+reaches late (Uzbekistan: 12 errored visits, 0 successes).
+
 **Consequence for `weekly_frequency`.** AeroDataBox-sourced edges observe ~12 of every 24 hours,
 so the existing `sampled_days_by_origin` extrapolation (Section 4.1.3) under-counts them by
 roughly half. Frequency extrapolation must scale by *sampled hours*, not sampled days, for these
@@ -979,6 +989,8 @@ FindRoutesInclusive(src, dst, aircraftCodes []string, maxHops):
 
 The only structural difference is: strict mode **filters edges** during traversal, inclusive mode **filters paths** at completion.
 
+The pseudocode shows each state carrying its path for readability. The implementation does not copy paths: a state holds its parent's index and a pointer to the edge that reached it, and a path is rebuilt only for a result (Phase 6.8, `internal/graph/path_arena.go`). The per-tier result cap and expansion gating are also left out here — see Section 8.2.
+
 ### 5.5 Country-to-Country Routes
 
 Country-to-country queries find all **direct flights** between airports in two countries. This is not a graph traversal — it's a filtered edge scan.
@@ -1220,7 +1232,7 @@ Two independent limits apply to every traversal (2026-07-05 review H1, built in 
 
   **Expansion is gated on the same counters, which is what makes this bound work and not only
   response size.** A state that can only contribute to tiers which are already full is never
-  enqueued, and its path/edge copies — the dominant allocation — are never made. A state at hop depth
+  enqueued. A state at hop depth
   *h* yields a destination match in tier *h* and each further descent lands one tier deeper, so its
   reachable tiers are exactly *h..maxHops*; when all of those are full it is pruned. This is
   output-preserving: a pruned subtree could only have produced results the cap would have rejected,
@@ -1245,8 +1257,32 @@ Two independent limits apply to every traversal (2026-07-05 review H1, built in 
   candidate result, so tiers fill quickly and gating engages early: ~74x faster with ~100x fewer
   allocations. For destination-*seeking* queries a tier only fills on a destination *hit*, which is
   rare in a large graph, so gating engages late — time improves ~7x while allocation volume is
-  essentially unchanged. That residue is the per-state path/edge deep-copying the 2026-07-05 review
-  named; it is untouched and is now the dominant remaining cost of an inclusive query.
+  essentially unchanged. That residue was the per-state path/edge deep-copying the 2026-07-05 review
+  named, removed in Phase 6.8.
+
+  **States no longer copy their paths (Phase 6.8, 2026-09-15).** Each BFS state used to carry its own
+  copy of the path and edge list, made on every expansion. States now live in one slice per traversal
+  and hold only their predecessor's index plus a pointer to the adjacency entry that reached them
+  (`internal/graph/path_arena.go`); a path is rebuilt only for a state that becomes a result, of which
+  there are at most 1,000. The pointer is sound only because the graph is immutable after load. Output
+  is unchanged: the baseline tests pass unmodified, and 144 queries across all four BFS variants on the
+  benchmark fixture returned identical routes, distances and `truncated` flags before and after. Same
+  400-edge-hub fixture at maxHops=3, M4 Pro, mean of 3 runs, both columns measured 2026-09-15:
+
+  | traversal | before (path copies) | after (parent-indexed states) |
+  |---|---|---|
+  | `FindRoutesInclusive` | 0.38 s / 2.65 GB / 8.05M allocs | **0.10 s** / 338 MB / 1,134 allocs |
+  | `FindRoutesFromInclusive` | 0.38 s / 2.66 GB / 8.08M allocs | **0.10 s** / 338 MB / 1,817 allocs |
+  | `FindRoutes` (strict) | 0.022 s / 87 MB / 302K allocs | **0.010 s** / 14.5 MB / 2,608 allocs |
+
+  Nearly all of the remaining bytes are the state slice regrowing: Go grows a large slice by about 25%
+  and copies it each time, so cumulative allocation comes to roughly five times the final size of the
+  states themselves. A block-allocated arena would remove that if it ever matters. One small query got
+  slower: a destination-seeking inclusive walk at maxHops=1 measured ~5% slower (429 → 450 µs,
+  back-to-back, 10 runs each), because loop detection now follows parent pointers into the adjacency
+  data instead of scanning a two-element slice in place. Every other benchmarked query measured faster.
+  `FindShortestRoute` still copies paths: its heap items are a different structure, and its only bound
+  is the time budget.
 - **A time budget.** Each traversal runs under a 10s context deadline, stated relative to the
   server's 30s `WriteTimeout`, because the two are easily confused: `WriteTimeout` closes the
   *connection* but does **not** cancel the request context, so without an explicit budget an
@@ -1518,33 +1554,44 @@ In strict mode, all arcs are solid highlight color. In inclusive mode, the visua
 
 ### 11.4 Aircraft Silhouette Icons
 
-Curated SVG silhouettes for the most common aircraft types, displayed as Leaflet markers at the midpoint of each route arc.
+Two layers per leg: a top-down silhouette on the map, rotated to the leg's bearing, and a side-profile
+image in the sidebar popover. Both are keyed by ICAO type designator, while the API returns IATA
+equipment codes, so every lookup goes IATA → ICAO first.
 
-**Icon set (~15-20 types covering >90% of routes):**
+**Bundle** — `web/public/assets/aircraft_shapes.json`, generated by `tools/build_shapes.py`:
 
-| IATA Code | Aircraft | File |
+| Key | Contents | Source |
 |---|---|---|
-| `388` | Airbus A380-800 | `388.svg` |
-| `77W` | Boeing 777-300ER | `77W.svg` |
-| `359` | Airbus A350-900 | `359.svg` |
-| `789` | Boeing 787-9 | `789.svg` |
-| `738` | Boeing 737-800 | `738.svg` |
-| `333` | Airbus A330-300 | `333.svg` |
-| `320` | Airbus A320 | `320.svg` |
-| `744` | Boeing 747-400 | `744.svg` |
-| `772` | Boeing 777-200 | `772.svg` |
-| `332` | Airbus A330-200 | `332.svg` |
-| `788` | Boeing 787-8 | `788.svg` |
-| `321` | Airbus A321 | `321.svg` |
-| `73H` | Boeing 737-800W | `73H.svg` |
-| `E90` | Embraer E190 | `E90.svg` |
-| `CR9` | Bombardier CRJ-900 | `CR9.svg` |
+| `iataToIcao` | IATA code → ICAO type | `:Aircraft` nodes in **both** graphs, plus two fixed tables in the script: sub-variant codes (`73H` → `B738`, from Wikipedia's list of aircraft type designators) and family codes (`777` → `77W`) |
+| `icaoToShape` | ICAO type → [shape name, scale] | tar1090's own selection rules (below) |
+| `shapes` | shape name → SVG, width, height | tar1090 `html/markers.js`, rendered as tar1090's `svgShapeToSVG` renders it, with the fill left for the map to set |
+| `defaultShape` | `airliner` | drawn for a code with no ICAO type, or a type with no shape |
 
-**Fallback:** `default.svg` — a generic aircraft silhouette used for any IATA code not in the curated set.
+**Shape choice** follows tar1090's `getBaseMarker` for a live aircraft: its type-designator table,
+then the type's description with wake category (from Mictronics `icao_aircraft_types.json` — an ATR 72
+is `L2T-M` → `twin_large`), then the description alone, then its first letter. Only the ADS-B emitter
+category is skipped, since a route has nothing equivalent. Size follows tar1090 too: a shape's width
+times the type's scale, relative to tar1090's 32 px standard, so an A380 draws larger than a Dash 8.
 
-**Source:** Open-source aviation silhouette SVG sets from the enthusiast community. Each SVG is a simple single-color outline (~1-2KB), styled via CSS fill color to match the arc color (highlight for target, muted for non-target).
+**Side profile** — `web/public/assets/aircraft/details/{ICAO}.bmp` from `rikgale/VRSOperatorFlags`,
+dropped from the popover when the file is absent.
 
-**Placement:** Icon rendered at the geographic midpoint of each arc, rotated to align with the arc's bearing at that point. This gives the visual impression of an aircraft flying along the route.
+**Coverage, measured 2026-09-16** over every aircraft code on live routes, and checked against
+tar1090's `getBaseMarker` and `svgShapeToSVG` executed from `markers.js` itself (261 lookups, 0
+mismatches): staging (OpenSky) — 100% of edges get a type-specific shape and a side profile; production
+(OpenFlights 2014) — 93%. The other 7% carry IATA **group** codes (`CRJ`, `ERJ`, `DH8`, `M80`, `32S`, …)
+that name a family rather than one type. No source consulted maps them, so they draw the default
+rather than a guessed representative.
+
+**Failure is loud.** A failed or empty download of either shape source aborts the build and leaves the
+existing bundle untouched, and `shapes.js` logs a console warning before falling back to its three
+built-in silhouettes when the bundle cannot load. Both exist because the previous build logged a 404
+for tar1090's retired `aircraft_shapes.js`, wrote an empty shapes table with exit status 0, and the map
+ran on fallback icons unnoticed.
+
+**Placement:** each icon sits on its arc, rotated to the arc's bearing at that point — at the midpoint
+for a leg only one route uses, and spread across the middle 80% of a leg several routes share so the
+icons never stack (`iconTForLeg` in `web/src/map.js`).
 
 ### 11.5 UI Layout
 

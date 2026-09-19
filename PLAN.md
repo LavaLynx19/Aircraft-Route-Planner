@@ -182,6 +182,7 @@ Status markers per `.claude/rules/design-plan-checklist.md`: `[x]` done · `[ ]`
     - `<img onerror="this.remove()">` gracefully drops the image when the BMP is absent
   - **Build:** `tools/build_shapes.py` — fetches all three upstream sources, queries Neo4j for IATA→ICAO, writes `aircraft_shapes.json` + extracts `Silhouettes.zip` to `details/`. Idempotent.
   - **Attribution:** generated `web/public/assets/aircraft/ATTRIBUTION.md` lists upstream URLs and bundle stats; merged asset set is GPL-3.0, Go/Python code unaffected.
+  - **Superseded 2026-09-16 (6.18):** tar1090 no longer publishes `aircraft_shapes.js`, so no top-down shape had been bundled. The bundle is now built from tar1090 `markers.js` with tar1090's own type → shape rules, `RexKramer1/AircraftShapesSVG` is dropped, and `shapes.js` reads `icaoToShape` (ARCHITECTURE.md §11.4)
 - [x] **Route results sidebar** (`web/src/sidebar.js`):
   - List of returned routes with hop count, total distance, per-leg breakdown
   - Each leg row: top-down silhouette + aircraft IATA + airline + distance
@@ -194,14 +195,24 @@ Status markers per `.claude/rules/design-plan-checklist.md`: `[x]` done · `[ ]`
   - `renderCountryGroups` draws one solid arc per airport-pair group; sidebar renders cards grouped by pair with one row per aircraft
   - Clicking a pair card calls `fitRoute(coords)`
 - [x] **Single-binary prod serving:** `cmd/server/main.go` conditionally mounts `http.FileServer(http.Dir("web/dist"))` for non-API paths when the directory exists. API paths (`/routes`, `/airports`, `/aircraft`, `/countries`, `/health`) keep going to the JSON handler. Dev unaffected — Vite on `:5173` proxies API calls to `:8080` (`web/vite.config.js`).
-- [ ] Verify (requires Neo4j + populated graph; run `docker compose up`, then `python tools/build_shapes.py`, then `cd web && npm run dev` alongside `go run ./cmd/server`):
-  - A380 LHR→SYD strict mode → green arcs on all legs
-  - A380 LHR→SYD inclusive mode → mixed green + grey arcs, correct icons per leg
-  - Map markers render correct top-down silhouette for common types (388, 77W, 359, 738, 333, A20N, B38M), rotated along arc bearing; default arrow for obscure/unknown types
-  - Hovering a leg in the sidebar opens popover with side-profile BMP + textual info; popover gracefully omits silhouette when BMP not available
-  - Map auto-zooms to fit the selected route
-  - Country mode "United Kingdom" → "Australia" returns grouped airport pairs; clicking a group zooms to that pair
-  - `cd web && npm run build && go run ./cmd/server` → UI loads at `http://localhost:8080/` (single-binary mode)
+- [x] **Verified in Chrome 2026-09-19** against the OpenFlights graph (:8080) with the Vite dev server,
+      after `npm run build` for the single-binary pass:
+  - A380 LHR→SYD strict → every leg drawn in the target colour. The colours are blue `#2563eb` solid and
+    grey dashed, not the "green" this checklist was written with (ARCHITECTURE §11.3 is authoritative)
+  - A380 LHR→SYD inclusive → mixed solid-blue and dashed-grey arcs, each leg carrying its own silhouette
+    (77W, 346, 333 grey; 388 blue)
+  - Silhouettes are type-specific and rotate to the arc bearing, and size with the aircraft — A380 and 747
+    quads are visibly distinct from 777/330 twins. The default is now an airliner outline, not the arrow
+    this checklist named (6.18)
+  - Sidebar hover → popover with the side-profile BMP, airline, distance and `77W (B77W)`. **Not
+    exercised:** the missing-BMP path, since every type served has one
+  - Clicking a route card zooms the map to that route and fades the others
+  - Country mode UK→Australia returns "No routes found" — correct, not a fault: the API itself returns 0
+    pairs, because the 2014 data has no direct UK–Australia flight. UK→United States returns grouped pairs.
+    **Not exercised:** clicking a group to zoom, since the filtered result held a single pair
+  - `http://localhost:8080/` serves the built UI and a DXB→JFK inclusive search works there, so the
+    production bundle carries the 6.18 icon code
+- Two defects found while verifying, both in 6.20
 
 **Depends on:** Phase 4 (API polished, all edge cases handled).
 
@@ -506,12 +517,12 @@ direct route is never crowded out by arbitrary 2-hop ones.
       `CountryRouteMeta`, and — asserted on raw JSON rather than a typed struct, which would read a
       missing key as false — that `truncated` stays *absent* when nothing was capped, so an
       untruncated response is byte-identical to before the cap existed
-- [>] Per-state path/edge deep-copying in `extend` — the gain above is uneven: destination-seeking
+- [x] Per-state path/edge deep-copying in `extend` — the gain above is uneven: destination-seeking
       inclusive queries improved ~7x in time but their allocation volume is essentially unchanged
       (2.65 GB, 8.1M allocs at maxHops=3), because a tier only fills on a rare destination hit. This
       copying is now the dominant remaining cost and was named in the 2026-07-05 review
-      → defer until: Phase 6.8 (inclusive-mode allocation redesign — candidate: store parent pointers
-      per state instead of copying the path and edge slices on every expansion)
+      — **done in 6.8** (2026-09-15): parent-indexed states replaced the copies, the parent-pointer
+      candidate this item was originally deferred with
 
 Sub-choices that were deferred to CODE, and how they actually landed: **N = 250 per tier** (so a
 3-hop response is bounded at 1,000), and the cap applies to **every** variant, not inclusive only —
@@ -540,8 +551,22 @@ O(depth) copying per state. Named in the 2026-07-05 review and unaddressed since
       loaded once and queries are the only hot path — **decided 2026-09-14: yes**, scheduled directly
       after batch 10 (6.15). The ~2.65 GB is cumulative allocation (GC churn), not peak memory, but it
       is the largest remaining cost on the only hot path
-- [ ] If yes: parent-pointer states, materialise paths only for accepted results, re-run
-      `internal/graph` benchmarks and the unchanged baseline tests as the correctness proof
+- [x] If yes: parent-pointer states, materialise paths only for accepted results, re-run
+      `internal/graph` benchmarks and the unchanged baseline tests as the correctness proof —
+      **done 2026-09-15**, applied to all four BFS variants by decision (strict shared `extend`, so
+      converting only inclusive would have left two state representations); `FindShortestRoute`
+      untouched. `internal/graph/path_arena.go` holds the states; `extend` is deleted
+- [x] Correctness: baseline and bounds tests pass unmodified. A throwaway dump of 144 queries (all four
+      variants, hops 0–3, three aircraft sets, two sources, two destinations) was identical before and
+      after — counts, `truncated` flags and route digests
+- [x] Measured at maxHops=3 (mean of 3): inclusive 0.38 s / 2.65 GB / 8.05M allocs → **0.10 s / 338 MB /
+      1,134 allocs**; from-inclusive → 0.10 s / 338 MB / 1,817 allocs; strict 0.022 s / 87 MB →
+      0.010 s / 14.5 MB. Regression found and accepted: inclusive at maxHops=1 is ~5% slower
+      (429 → 450 µs, back-to-back A/B, 10 runs each) because loop detection follows parent pointers;
+      recorded in ARCHITECTURE.md §8.2
+- [>] The remaining ~338 MB per 3-hop inclusive query is state-slice regrowth (~5× the final state size);
+      a block-allocated arena would remove it → defer until: Phase 6.4 production cut-over, re-benchmark
+      against the promoted graph before deciding
 
 **Depends on:** 6.7 (the benchmarks and baseline tests that would verify it already exist).
 
@@ -764,13 +789,10 @@ Sep M4, M5, L7 plus the launchd late-fire found in 6.6. **Verified:** ruff clean
       currently reflect one 12-hour window only
       → defer until: the first sweep completes (~2026-09-28), then re-check that half 1 is selected
 
-**Remaining after batch 9** (updated 2026-09-14): batch 10 → 6.15, Jul S8 → 6.16, then the 6.8
-redesign. Still open beyond those: Jul M5 partials (full-name alias, `AliasToIATA` case-folding — 6.10's
-deferrals), Jul S3 remainder (`haversine.go`/`loader.go` untested), Sep M6 (static source partition),
-and batch 11 — **17 ruff errors / 11 unformatted files** across `ingest/` and `tools/`, plus the
-`/health` nil-driver panic. **New 2026-09-14:** `web/public/assets/aircraft/ATTRIBUTION.md` reports
-**0 top-down silhouette shapes** — the tar1090 fetch in `tools/build_shapes.py` appears to yield nothing,
-so map icons likely all fall back to the default.
+**Remaining after batch 9** (updated 2026-09-16): batch 10 → 6.15, Jul S8 → 6.16, the 6.8 redesign
+(done 2026-09-15), batch 11 → 6.18. Still open beyond those: Jul M5 partials (full-name alias,
+`AliasToIATA` case-folding — 6.10's deferrals) and Sep M6 (static source partition), which needs an
+architecture discussion rather than a patch.
 
 ---
 
@@ -826,6 +848,110 @@ put interpolated identifiers into SQL; S6 splits into two single-purpose package
 - [x] `data_planning/` stays private. Its three research notes are summarised in ARCHITECTURE.md §13.1–13.3
       and the two code reviews explained in §13.4; every reference in README, PLAN, ARCHITECTURE and four
       ingest docstrings now points there
+
+---
+
+#### 6.18 Review-Findings Batch 11 — Lint Debt, Test Gaps, Fetch Agents, Map Icons (2026-09-16)
+
+Batch 11 as planned (ruff debt, the `/health` nil driver, the Jul S3 remainder), plus two faults found
+while checking it: the scheduled jobs had stopped, and the map had been drawing fallback icons.
+
+- [x] **Lint** — 17 ruff errors and 10 unformatted files across `ingest/` and `tools/` → 0 and 0. Import
+      order autofixed. The 3 shebangs were removed rather than the files made executable: every
+      documented invocation is `python3 <path>`, and `env python3` would pick whatever interpreter is
+      first on `PATH` over the CLT 3.9 the agents need. `tools/build_shapes.py`'s blind excepts went
+      with its rewrite (below). Formatting verified behaviour-neutral by AST comparison: only the 5
+      import-reordered files differ, and only in import order
+- [x] **`/health` nil driver** — reports `neo4j_ok: false` and `status: degraded` instead of panicking
+      (`TestHealthWithoutDriverReportsDegraded`). Production always has a driver, so it is unchanged there
+- [x] **Jul S3 remainder** — `haversine_test.go` (exact great-circle fractions, symmetry, antimeridian)
+      and `loader_integration_test.go`, which runs `LoadGraph` against a real Neo4j and checks edge
+      endpoints, `EdgeCount`, the `stale` filter against a live count, `ByCountry`/`Countries`, and
+      `AliasToIATA`/`Families`. Skipped without `NEO4J_PASSWORD` or under `-short`; passed against staging
+      (53,430 edges) and production (92,451)
+- [x] **Fetch agents repointed** — all three launchd jobs failed on 2026-09-15 with exit 78: their plists
+      still named `~/Desktop/Antigravity/…` after the repo moved. Plists repointed and reloaded (they live
+      outside the repo; RUNBOOK §4 now documents the failure and the fix). The 2026-09-16 09:00, 10:00 and
+      11:00 runs then succeeded unattended. A recovery kickstart on 2026-09-15 restored the AeroDataBox
+      day (monthly quota) but not the OpenSky one: its rolling 24h credits left the next morning's run
+      only 2 airports, exactly as RUNBOOK §4 already warned
+- [x] **Map icons** — no top-down shape had been bundled since tar1090 retired `aircraft_shapes.js`; the
+      build logged the 404 and exited 0. `build_shapes.py` now reads `markers.js` and applies tar1090's
+      own type → shape rules, with Mictronics type descriptions for types not listed by designator;
+      `iataToIcao` reads both graphs plus 22 sourced IATA variant codes; `RexKramer1/AircraftShapesSVG`
+      is dropped (its repo layout changed, and every served type already resolves); a failed source now
+      aborts the build. Icons size by aircraft. Verified against tar1090's `getBaseMarker` and
+      `svgShapeToSVG` executed from `markers.js` (261 lookups, 0 mismatches) and by rendering the 25
+      shapes in use: staging 100% type-specific, production 93%
+- [>] IATA group codes (`CRJ`, `ERJ`, `DH8`, `M80`, `32S`, … — 32 codes on 6,464 production edges) draw the
+      default icon: each names a family, and no source consulted maps them → defer until: Phase 6.4
+      production cut-over, which retires the OpenFlights data that carries them (staging has none)
+- [x] Verify: Go build, vet and tests green, `gofmt -l` silent; `ruff check` and `ruff format --check`
+      clean across `ingest/` and `tools/`; all tracked Python compiles on CLT 3.9.6; 109 pytest pass
+
+---
+
+#### 6.19 AeroDataBox Empty Windows (2026-09-17)
+
+Found while checking the scheduled jobs: 11 of 19 calls on 2026-09-17 were recorded as errors. Most were
+not faults. A window with no departures returns HTTP 204 with an empty body (documented in the API's
+OpenAPI spec for `GetAirportFlightsRelative`), and the fetcher parsed it as JSON. Approved 2026-09-17,
+together with flipping the half after an empty window.
+
+- [x] `fetch_departures` returns `empty` for HTTP 204. An unparseable body on any other status stays an
+      `error`, and error lines now carry `(HTTP n)` when a response arrived, so tomorrow's log can tell
+      a malformed body from a network failure
+- [x] `due_airports` flips the half after the newest `ok` **or** `empty` visit, matching the pair
+      `_window_resolved` already treats as collected; a failed visit still retries the same half.
+      ARCHITECTURE.md §4.1.5 amended
+- [x] `classify`'s `UNPRODUCTIVE` detail reports empty and error counts separately
+- [x] Tests: 5 response cases in `test_fetch.py` (204, 200 with departures, 200 with none, malformed 200,
+      network failure), 2 half-selection cases in `test_queue.py`, 1 all-empty classify case. The
+      batch-10 shortfall test needed its two setup rows a day apart: with `empty` now counting when
+      choosing the half, identical timestamps made that choice a tie. 117 pytest pass on CLT 3.9; ruff
+      clean. Not run: the new tests against the pre-fix code (declined)
+- [x] Live queue, read-only: the next 19 airports are unchanged; the full queue gains UNEE on half 1,
+      whose half-0 window came back empty on 2026-09-16
+- [x] **Verified live at the 2026-09-18 10:00 run** (04:34 UTC), which executed this code unattended:
+      **11 ok, 8 empty, 0 error**, and zero `JSONDecodeError` or `HTTP` lines in the log. Under the old
+      code those 8 would have been errors, so the empty bodies were all 204s and the fix is complete.
+      All 19 were first visits, so the half flip is not yet exercised in production — every logged visit
+      is still half 0, and the first flip lands when the sweep reaches its second pass (~2026-09-28)
+
+The 42 visits already recorded as `error` are left as recorded. Each such airport repeats that half once
+at its next turn, which costs the one unit any visit costs, then records whatever that window holds and
+flips as normal.
+
+---
+
+#### 6.20 Found During the Phase 5 Verification (2026-09-19)
+
+- [x] **The refresh chain cannot restart a server** — **fixed 2026-09-19.** Its restart step ran for real for the first time on
+      2026-09-19 and failed: `run-server.sh: line 32: exec: go: not found`, logged to
+      `ingest/data/api-openflights.log`, then `--- run RESTART_FAILED ... not healthy on :8080 within 90s`.
+      launchd gives a job the bare `/usr/bin:/bin:/usr/sbin:/sbin`, and Homebrew's go is at
+      `/opt/homebrew/bin/go`. Every earlier run logged "no API server running, nothing to restart", which is
+      why 6.6 never caught it. The alarm itself worked. Candidate fixes: resolve the interpreter in
+      `run-server.sh`, set `PATH` in the plist, or pass an environment from `refresh._start` — needs a
+      decision, and RUNBOOK §4's claim that the chain restarts running servers is wrong until then.
+      **Fixed in `run-server.sh`**, which resolves the toolchain itself (`GO_BIN`, then `command -v go`,
+      then the usual install paths): the plist is not in this repository, and cron would hit the same
+      minimal PATH. **A second cause surfaced during the fix:** the first `go run` under launchd's
+      environment was a full rebuild, because the build-cache key includes the environment — 103s
+      measured, against a 90s startup budget, so the chain declared a restart failed while it was still
+      compiling. `refresh.STARTUP_BUDGET_SECONDS` is now 180. Verified end to end by kickstarting the
+      real agent against a running server: `--- run OK: 54024 edges served, 5550 marked stale;
+      restarted 1 server(s) ---`, the server back in ~5s serving a newer snapshot
+- [x] **The country tab silently applies the other tab's aircraft filter** — **fixed 2026-09-19.** Both
+      tabs share one `state.aircraft` (`web/src/controls.js`), but each renders its own input, so after
+      searching 388 on the airport tab, a UK→United States country search returned only A380 pairs while
+      its aircraft box showed the "any" placeholder. Sharing is kept — the same aircraft in a different
+      scope is a reasonable next query — and the markup now renders from state instead, so the filter is
+      visible. **The same root cause reached further than the finding said:** `from`/`to`, both country
+      fields, and the mode and max-hops buttons were all rendered from hardcoded markup, so a tab
+      round-trip displayed Inclusive/2 whatever was selected while the state kept the real values. All of
+      them now render from state, through one `escapeAttr` helper. Verified in the browser: 388 + Strict +
+      3 hops set on the airport tab show as 388 in the country tab's box, and survive the trip back
 
 ---
 

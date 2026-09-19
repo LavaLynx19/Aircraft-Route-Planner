@@ -1,8 +1,8 @@
 """Load OurAirports → staging Neo4j :Airport nodes (same shape as production)."""
-from neo4j import GraphDatabase
 
 from airports_oa import parse_airports
 from config import staging_neo4j_config
+from neo4j import GraphDatabase
 
 BATCH_SIZE = 1000
 

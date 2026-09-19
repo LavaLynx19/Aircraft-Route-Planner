@@ -97,6 +97,21 @@ class TestSchedulesQueue:
 
         assert fetch_schedules.due_airports(conn, 1) == [("ZSPD", 1)]
 
+    def test_half_flips_after_an_empty_window(self, conn):
+        """No departures is a real observation; the flights may be in the other half."""
+        add_schedule_airport(conn, "UZFA")
+        add_schedule_attempt(conn, "UZFA", status="empty", days_ago=23, half=0)
+
+        assert fetch_schedules.due_airports(conn, 1) == [("UZFA", 1)]
+
+    def test_half_flips_from_the_newest_resolved_visit(self, conn):
+        """An old success must not outvote a newer empty window."""
+        add_schedule_airport(conn, "UZFA")
+        add_schedule_attempt(conn, "UZFA", status="ok", days_ago=46, half=0)
+        add_schedule_attempt(conn, "UZFA", status="empty", days_ago=23, half=1)
+
+        assert fetch_schedules.due_airports(conn, 1) == [("UZFA", 0)]
+
     def test_half_does_not_flip_after_a_failure(self, conn):
         """A failed attempt collected nothing, so retry the same half."""
         add_schedule_airport(conn, "ZSPD")
@@ -238,13 +253,16 @@ class TestSchedulesBatchIsNotShortened:
         three resolved windows ahead of one owed airport returned nothing at
         limit=1. Consistent production timestamps make that ordering unlikely (a
         window resolved today sorts last), which is why it is built by hand: each
-        resolved airport's log rows carry the current window but a 40-day-old
-        fetched_at.
+        resolved airport's log rows carry the current window but an old fetched_at.
+
+        The half-1 success is a day newer than the half-0 empty row. Both count
+        as resolved when choosing the next half, so identical timestamps would
+        make that choice a tie.
         """
         _offset, current_half0_date = fetch_schedules.window_for(0)
-        old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(
-            timespec="seconds"
-        )
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=40)).isoformat(timespec="seconds")
+        newer = (now - timedelta(days=39)).isoformat(timespec="seconds")
         insert = (
             "INSERT OR REPLACE INTO schedules_fetch_log (airport_icao, window_date, "
             "day_half, status, flight_count, fetched_at, attempts) VALUES (?,?,?,?,?,?,?)"
@@ -252,7 +270,7 @@ class TestSchedulesBatchIsNotShortened:
         for rank, icao in enumerate(("ZRES1", "ZRES2", "ZRES3")):
             add_schedule_airport(conn, icao, rank=rank)
             # Newest ok on half 1, so half 0 is selected next ...
-            conn.execute(insert, (icao, "2026-01-01", 1, "ok", 0, old, 1))
+            conn.execute(insert, (icao, "2026-01-01", 1, "ok", 0, newer, 1))
             # ... and half 0's current window is already resolved.
             conn.execute(insert, (icao, current_half0_date, 0, "empty", 0, old, 1))
         conn.commit()

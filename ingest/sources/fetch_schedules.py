@@ -130,9 +130,11 @@ def due_airports(conn: sqlite3.Connection, limit: int) -> list:
     re-queued every single run, and 10 such airports were consuming a 19-call
     daily budget (measured 2026-09-10).
 
-    The half, in contrast, still flips from the last *successful* visit: a
-    failed attempt collected nothing, so the next try should cover the same
-    half rather than skip it.
+    The half, in contrast, flips from the last *resolved* visit — 'ok' or
+    'empty', the same pair `_window_resolved` counts. An empty window is a real
+    observation, so the next visit samples the other half, where the flights may
+    be. A failed attempt collected nothing, so the next try covers the same half
+    rather than skip it.
     """
     # Order every candidate, then drop already-resolved windows, then truncate.
     # This used to over-fetch `limit * 3` rows and filter only those, which came
@@ -144,7 +146,7 @@ def due_airports(conn: sqlite3.Connection, limit: int) -> list:
                sa.rank,
                MAX(sl.fetched_at) AS last_attempt,
                (SELECT day_half FROM schedules_fetch_log
-                 WHERE airport_icao = sa.icao AND status = 'ok'
+                 WHERE airport_icao = sa.icao AND status IN ('ok','empty')
                  ORDER BY fetched_at DESC LIMIT 1) AS last_half
         FROM schedules_airports sa
         LEFT JOIN schedules_fetch_log sl
@@ -225,8 +227,19 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
             "User-Agent": USER_AGENT,
         },
     )
+    http_status = None
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+            http_status = resp.status
+            if http_status == 204:
+                # The API's documented answer for a window with no departures
+                # (OpenAPI GetAirportFlightsRelative), with an empty body. Parsing
+                # it as JSON recorded these windows as errors, and an error never
+                # flips the half, so each such airport re-queried the same empty
+                # half on every visit and its other half was never sampled. 42
+                # responses logged this way by 2026-09-17, 21 of 76 calls in that
+                # week's four runs.
+                return "empty", []
             body = json.load(resp)
         departures = body.get("departures") or []
         return ("ok" if departures else "empty"), departures
@@ -248,8 +261,10 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
     except (OSError, json.JSONDecodeError) as e:
         # OSError, not TimeoutError: on Python 3.9 socket.timeout is a sibling of
         # TimeoutError under OSError, not an alias, so the narrower form lets one
-        # slow response abort the whole run.
-        print(f"  {icao}: {type(e).__name__}: {e}")
+        # slow response abort the whole run. The HTTP status, when a response
+        # arrived, is what tells a malformed body apart from a network failure.
+        where = f" (HTTP {http_status})" if http_status else ""
+        print(f"  {icao}: {type(e).__name__}{where}: {e}")
         return "error", []
 
 
@@ -375,7 +390,7 @@ def classify(stats: dict) -> tuple:
     if stats["ok"] == 0:
         return "UNPRODUCTIVE", (
             f"0 of {stats['queued']} airports returned schedules "
-            f"({stats['error']} errors)"
+            f"({stats['empty']} empty, {stats['error']} errors)"
         )
     return "OK", f"{stats['monthly_remaining']} units left this month"
 

@@ -102,3 +102,14 @@ func (g *Graph) FindShortestRoute(ctx context.Context, src, dst string, aircraft
 	}
 	return nil, nil
 }
+
+// inPath reports whether node already appears on path. FindShortestRoute is its
+// only user: the BFS traversals walk parent indices instead (see pathState).
+func inPath(path []string, node string) bool {
+	for _, p := range path {
+		if p == node {
+			return true
+		}
+	}
+	return false
+}

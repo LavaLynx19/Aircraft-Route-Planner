@@ -70,7 +70,14 @@ produces only one log row, so `count(*)` reports less than was actually spent (c
 The schedules job reports `--- run OK: N units left this month ---`. Near the monthly ceiling it
 reports `run OK: monthly unit quota exhausted` and exits 0 — that is the **expected** end state
 each month, not a fault, so it deliberately does not alarm. An `UNPRODUCTIVE` exit from it means
-it had budget and still collected nothing, which is a real problem.
+it had budget and still collected nothing, which is a real problem; its detail line separates empty
+windows from errors, since they point at different causes.
+
+A window with no departures is `empty`, not an error: the API answers **HTTP 204** with no body.
+Before 2026-09-17 those were logged as `  <ICAO>: JSONDecodeError: Expecting value: line 1 column 1
+(char 0)` and recorded as errors, so old logs overstate the error rate. Error lines now carry the HTTP
+status when a response arrived — `JSONDecodeError (HTTP 200)` is a genuinely malformed body, while a
+line with no status is a network failure.
 
 ```bash
 tail -20 ingest/data/schedules.log                       # last schedules run
@@ -78,6 +85,16 @@ sqlite3 ingest/data/opensky_cache.db \
   "SELECT COALESCE(SUM(attempts),0) FROM schedules_fetch_log
    WHERE substr(fetched_at,1,7)=strftime('%Y-%m','now');"
 ```
+
+**The restart step was broken until 2026-09-19** and is worth knowing about, because both causes recur.
+launchd gives a job the bare `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which holds no Go toolchain, so the
+chain stopped a running server and could not start it again (`exec: go: not found` in
+`ingest/data/api-<profile>.log`, then `--- run RESTART_FAILED ... ---`). `run-server.sh` now resolves the
+binary itself — set `GO_BIN` if Go lives somewhere unusual. The second cause: `go run` compiles before it
+binds, and the build cache is keyed partly on the environment, so the first run under launchd rebuilt
+everything (103s, against what was then a 90s budget) and the chain called it failed mid-compile.
+`refresh.STARTUP_BUDGET_SECONDS` is 180 for that reason; expect one slow restart after a Go upgrade.
+A failed restart alarms and names the profile and port, so it is loud rather than silent.
 
 Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), Docker containers, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and
@@ -180,6 +197,39 @@ System Settings → Privacy & Security → Full Disk Access → + → Cmd+Shift+
 An Xcode Command Line Tools major bump can move that 3.9 framework path and re-break the grant.
 The staleness check below is what catches it.
 
+### Moving the project directory — the plists hold absolute paths
+
+All three plists name the script, `WorkingDirectory` and both log paths absolutely. Move or rename the
+repo and every job fails before Python starts: `launchctl list` shows last exit **78** (`EX_CONFIG`),
+and nothing reaches the logs, because they point at the old location too. The cause is only in the
+system log:
+
+```bash
+log show --last 24h --style compact \
+  --predicate 'eventMessage CONTAINS "aircraft-route-planner"' | grep -i 'could not initialize'
+# … Service could not initialize: Unable to set current working directory. path = <old path>
+```
+
+This happened when the repo moved from `~/Desktop/Antigravity/` to `~/Desktop/My Projects/`: every
+2026-09-15 run was lost. Full Disk Access did **not** need re-granting — the grant is keyed to the
+interpreter binary, which did not move, and the 2026-09-16 runs then succeeded unattended.
+
+Repoint the four path-bearing keys in each plist and reload it. The three string keys take a plain
+`plutil -replace`:
+
+```bash
+P=~/Library/LaunchAgents/com.aircraft-route-planner.fetch.plist
+plutil -replace WorkingDirectory  -string "<repo>/ingest/sources"        "$P"
+plutil -replace StandardOutPath   -string "<repo>/ingest/data/fetch.log" "$P"
+plutil -replace StandardErrorPath -string "<repo>/ingest/data/fetch.log" "$P"
+```
+
+`ProgramArguments` needs care: `plutil -replace ProgramArguments.1 -string <script>` **inserts** at
+index 1 instead of overwriting, leaving the old path as a third argument (observed 2026-09-15; harmless
+only because the scripts ignore arguments). Follow it with `plutil -remove ProgramArguments.2`, check
+with `plutil -p "$P"` that exactly two arguments remain, then `launchctl unload "$P"` and
+`launchctl load "$P"`. Unload stops a job that is mid-run, so wait for a running job to finish first.
+
 ### Verifying the job — a shell run proves nothing
 
 `python3 ingest/sources/fetch_flights.py` in Terminal succeeds regardless of TCC, because
@@ -200,8 +250,9 @@ Each run prints `--- run started <ts> ---` and one of three outcomes:
 | `--- run FAILED: ... ---` | 1 | crashed; the exception is on the line |
 
 Indented `  <ICAO>: <ExceptionName>: <msg>` lines are per-airport network failures. A handful is
-normal transient noise — that airport is recorded `error` and retried next run, since
-resumability only skips `ok`. Many in one run points at connectivity or a bad credential, and
+normal transient noise. That airport is recorded `error`, and because a failed attempt still counts as
+a visit it is retried at its next turn in the queue rather than on the next run; `ok` and `empty` both
+mark its window collected. Many in one run points at connectivity or a bad credential, and
 if none succeed the run ends `UNPRODUCTIVE`.
 
 Both non-zero outcomes also raise a macOS notification. `UNPRODUCTIVE` exists because a
@@ -212,6 +263,11 @@ Note a kickstart spends the day's ~3,750 credits, and OpenSky's quota is not cal
 aligned — it rolls off ~24h after each spend. A manual kickstart therefore pushes the next
 scheduled run inside that shadow and can make it come back `UNPRODUCTIVE`; this happened on
 2026-09-03. Prefer letting the 09:00 run do its thing over kickstarting.
+
+It recurred on 2026-09-15: a kickstart at 23:11 local, meant to recover a day lost to a moved project
+directory (see above), left the next morning's run just 2 airports before the credit floor. A missed
+OpenSky day cannot be bought back, only moved. AeroDataBox is different — its quota is monthly, so a
+recovery run there does restore the missed day.
 
 ### Staleness check — has the cache stopped growing?
 
