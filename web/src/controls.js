@@ -119,6 +119,15 @@ function countryOptions(results) {
   return results.map((c) => ({ value: c, label: c }));
 }
 
+// Inputs and segmented buttons are rendered from `state`, never left to their
+// markup defaults. The two scopes share one state object but build their own
+// markup, so a field that ignored state showed a placeholder while the search
+// still used the old value — a country search silently kept the airport tab's
+// aircraft filter (found in the 2026-09-19 Phase 5 verification), and the mode
+// and max-hops buttons re-rendered as Inclusive/2 whatever had been picked.
+const escapeAttr = (v) =>
+  String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
 // Build the controls UI inside `container`. Returns an object with `getState()`,
 // `setScope(s)`, and a `submit` callback invoked when the user clicks Search.
 export function buildControls(container, { onSubmit, scope = 'airport' }) {
@@ -140,26 +149,26 @@ export function buildControls(container, { onSubmit, scope = 'airport' }) {
       container.innerHTML = `
         <div>
           <label for="ac">Aircraft</label>
-          <div class="field"><input id="ac" placeholder="e.g. A380, 388" autocomplete="off" /></div>
+          <div class="field"><input id="ac" placeholder="e.g. A380, 388" autocomplete="off" value="${escapeAttr(state.aircraft)}" /></div>
         </div>
         <div class="row">
-          <div class="field"><label for="from">From</label><input id="from" placeholder="LHR" autocomplete="off" /></div>
-          <div class="field"><label for="to">To</label><input id="to" placeholder="SYD" autocomplete="off" /></div>
+          <div class="field"><label for="from">From</label><input id="from" placeholder="LHR" autocomplete="off" value="${escapeAttr(state.from)}" /></div>
+          <div class="field"><label for="to">To</label><input id="to" placeholder="SYD" autocomplete="off" value="${escapeAttr(state.to)}" /></div>
         </div>
         <div>
           <label>Max hops</label>
           <div class="segmented" id="hops">
-            <button data-hops="0">0</button>
-            <button data-hops="1">1</button>
-            <button data-hops="2" class="active">2</button>
-            <button data-hops="3">3</button>
+            <button data-hops="0"${state.maxHops === 0 ? ' class="active"' : ''}>0</button>
+            <button data-hops="1"${state.maxHops === 1 ? ' class="active"' : ''}>1</button>
+            <button data-hops="2"${state.maxHops === 2 ? ' class="active"' : ''}>2</button>
+            <button data-hops="3"${state.maxHops === 3 ? ' class="active"' : ''}>3</button>
           </div>
         </div>
         <div>
           <label>Mode</label>
           <div class="segmented" id="mode">
-            <button data-mode="strict">Strict</button>
-            <button data-mode="inclusive" class="active">Inclusive</button>
+            <button data-mode="strict"${state.mode === 'strict' ? ' class="active"' : ''}>Strict</button>
+            <button data-mode="inclusive"${state.mode === 'inclusive' ? ' class="active"' : ''}>Inclusive</button>
           </div>
         </div>
         <button id="search-btn">Search</button>
@@ -187,12 +196,12 @@ export function buildControls(container, { onSubmit, scope = 'airport' }) {
     } else {
       container.innerHTML = `
         <div class="row">
-          <div class="field"><label for="fc">From country</label><input id="fc" placeholder="United Kingdom" autocomplete="off" /></div>
-          <div class="field"><label for="tc">To country</label><input id="tc" placeholder="Australia" autocomplete="off" /></div>
+          <div class="field"><label for="fc">From country</label><input id="fc" placeholder="United Kingdom" autocomplete="off" value="${escapeAttr(state.fromCountry)}" /></div>
+          <div class="field"><label for="tc">To country</label><input id="tc" placeholder="Australia" autocomplete="off" value="${escapeAttr(state.toCountry)}" /></div>
         </div>
         <div>
           <label for="ac2">Aircraft (optional)</label>
-          <div class="field"><input id="ac2" placeholder="any" autocomplete="off" /></div>
+          <div class="field"><input id="ac2" placeholder="any" autocomplete="off" value="${escapeAttr(state.aircraft)}" /></div>
         </div>
         <button id="search-btn">Search</button>
       `;

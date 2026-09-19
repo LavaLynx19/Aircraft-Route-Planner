@@ -942,11 +942,16 @@ flips as normal.
       compiling. `refresh.STARTUP_BUDGET_SECONDS` is now 180. Verified end to end by kickstarting the
       real agent against a running server: `--- run OK: 54024 edges served, 5550 marked stale;
       restarted 1 server(s) ---`, the server back in ~5s serving a newer snapshot
-- [ ] **The country tab silently applies the other tab's aircraft filter.** Both tabs share one
-      `state.aircraft` (`web/src/controls.js`), but each renders its own input, so after searching 388 on
-      the airport tab, a UK→United States country search returns only A380 pairs while its aircraft box
-      shows the "any" placeholder. Fix is either rendering the input from state or clearing state on a tab
-      switch — a behaviour decision
+- [x] **The country tab silently applies the other tab's aircraft filter** — **fixed 2026-09-19.** Both
+      tabs share one `state.aircraft` (`web/src/controls.js`), but each renders its own input, so after
+      searching 388 on the airport tab, a UK→United States country search returned only A380 pairs while
+      its aircraft box showed the "any" placeholder. Sharing is kept — the same aircraft in a different
+      scope is a reasonable next query — and the markup now renders from state instead, so the filter is
+      visible. **The same root cause reached further than the finding said:** `from`/`to`, both country
+      fields, and the mode and max-hops buttons were all rendered from hardcoded markup, so a tab
+      round-trip displayed Inclusive/2 whatever was selected while the state kept the real values. All of
+      them now render from state, through one `escapeAttr` helper. Verified in the browser: 388 + Strict +
+      3 hops set on the airport tab show as 388 in the country tab's box, and survive the trip back
 
 ---
 
