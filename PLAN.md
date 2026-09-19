@@ -195,14 +195,24 @@ Status markers per `.claude/rules/design-plan-checklist.md`: `[x]` done · `[ ]`
   - `renderCountryGroups` draws one solid arc per airport-pair group; sidebar renders cards grouped by pair with one row per aircraft
   - Clicking a pair card calls `fitRoute(coords)`
 - [x] **Single-binary prod serving:** `cmd/server/main.go` conditionally mounts `http.FileServer(http.Dir("web/dist"))` for non-API paths when the directory exists. API paths (`/routes`, `/airports`, `/aircraft`, `/countries`, `/health`) keep going to the JSON handler. Dev unaffected — Vite on `:5173` proxies API calls to `:8080` (`web/vite.config.js`).
-- [ ] Verify (requires Neo4j + populated graph; run `docker compose up`, then `python tools/build_shapes.py`, then `cd web && npm run dev` alongside `go run ./cmd/server`):
-  - A380 LHR→SYD strict mode → green arcs on all legs
-  - A380 LHR→SYD inclusive mode → mixed green + grey arcs, correct icons per leg
-  - Map markers render correct top-down silhouette for common types (388, 77W, 359, 738, 333, A20N, B38M), rotated along arc bearing; default arrow for obscure/unknown types
-  - Hovering a leg in the sidebar opens popover with side-profile BMP + textual info; popover gracefully omits silhouette when BMP not available
-  - Map auto-zooms to fit the selected route
-  - Country mode "United Kingdom" → "Australia" returns grouped airport pairs; clicking a group zooms to that pair
-  - `cd web && npm run build && go run ./cmd/server` → UI loads at `http://localhost:8080/` (single-binary mode)
+- [x] **Verified in Chrome 2026-09-19** against the OpenFlights graph (:8080) with the Vite dev server,
+      after `npm run build` for the single-binary pass:
+  - A380 LHR→SYD strict → every leg drawn in the target colour. The colours are blue `#2563eb` solid and
+    grey dashed, not the "green" this checklist was written with (ARCHITECTURE §11.3 is authoritative)
+  - A380 LHR→SYD inclusive → mixed solid-blue and dashed-grey arcs, each leg carrying its own silhouette
+    (77W, 346, 333 grey; 388 blue)
+  - Silhouettes are type-specific and rotate to the arc bearing, and size with the aircraft — A380 and 747
+    quads are visibly distinct from 777/330 twins. The default is now an airliner outline, not the arrow
+    this checklist named (6.18)
+  - Sidebar hover → popover with the side-profile BMP, airline, distance and `77W (B77W)`. **Not
+    exercised:** the missing-BMP path, since every type served has one
+  - Clicking a route card zooms the map to that route and fades the others
+  - Country mode UK→Australia returns "No routes found" — correct, not a fault: the API itself returns 0
+    pairs, because the 2014 data has no direct UK–Australia flight. UK→United States returns grouped pairs.
+    **Not exercised:** clicking a group to zoom, since the filtered result held a single pair
+  - `http://localhost:8080/` serves the built UI and a DXB→JFK inclusive search works there, so the
+    production bundle carries the 6.18 icon code
+- Two defects found while verifying, both in 6.20
 
 **Depends on:** Phase 4 (API polished, all edge cases handled).
 
@@ -911,6 +921,24 @@ together with flipping the half after an empty window.
 The 42 visits already recorded as `error` are left as recorded. Each such airport repeats that half once
 at its next turn, which costs the one unit any visit costs, then records whatever that window holds and
 flips as normal.
+
+---
+
+#### 6.20 Found During the Phase 5 Verification (2026-09-19)
+
+- [ ] **The refresh chain cannot restart a server.** Its restart step ran for real for the first time on
+      2026-09-19 and failed: `run-server.sh: line 32: exec: go: not found`, logged to
+      `ingest/data/api-openflights.log`, then `--- run RESTART_FAILED ... not healthy on :8080 within 90s`.
+      launchd gives a job the bare `/usr/bin:/bin:/usr/sbin:/sbin`, and Homebrew's go is at
+      `/opt/homebrew/bin/go`. Every earlier run logged "no API server running, nothing to restart", which is
+      why 6.6 never caught it. The alarm itself worked. Candidate fixes: resolve the interpreter in
+      `run-server.sh`, set `PATH` in the plist, or pass an environment from `refresh._start` — needs a
+      decision, and RUNBOOK §4's claim that the chain restarts running servers is wrong until then
+- [ ] **The country tab silently applies the other tab's aircraft filter.** Both tabs share one
+      `state.aircraft` (`web/src/controls.js`), but each renders its own input, so after searching 388 on
+      the airport tab, a UK→United States country search returns only A380 pairs while its aircraft box
+      shows the "any" placeholder. Fix is either rendering the input from state or clearing state on a tab
+      switch — a behaviour decision
 
 ---
 

@@ -86,6 +86,12 @@ sqlite3 ingest/data/opensky_cache.db \
    WHERE substr(fetched_at,1,7)=strftime('%Y-%m','now');"
 ```
 
+**Known broken as of 2026-09-19: the restart step.** `run-server.sh` execs `go`, which is not on the
+minimal `PATH` launchd gives a job, so the chain stops a running server and then fails to bring it back,
+ending `--- run RESTART_FAILED ... ---` with `exec: go: not found` in `ingest/data/api-<profile>.log`. Until
+that is fixed, restart a server by hand after a refresh (`./scripts/run-server.sh openflights`). The
+alarm fires correctly, so the failure is loud rather than silent.
+
 Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), Docker containers, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and
 restarts any server already running** (§4.1.5 *Refresh chain*), so a server you leave up picks up
