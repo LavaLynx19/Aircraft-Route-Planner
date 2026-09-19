@@ -29,4 +29,23 @@ case "${1:-}" in
     ;;
 esac
 
-exec go run ./cmd/server
+# launchd hands a job the bare PATH /usr/bin:/bin:/usr/sbin:/sbin, which holds no
+# Go toolchain, so a plain `exec go` works in a terminal and fails under the
+# refresh chain's restart step — as it did on 2026-09-19, stopping a server it
+# could not bring back. Resolve the binary here rather than in the plist: the
+# plist is not in this repository, and cron would hit the same minimal PATH.
+GO_BIN="${GO_BIN:-$(command -v go || true)}"
+if [ -z "$GO_BIN" ]; then
+  for candidate in /opt/homebrew/bin/go /usr/local/bin/go /usr/local/go/bin/go; do
+    if [ -x "$candidate" ]; then
+      GO_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$GO_BIN" ]; then
+  echo "go toolchain not found — set GO_BIN, or add go to PATH" >&2
+  exit 1
+fi
+
+exec "$GO_BIN" run ./cmd/server

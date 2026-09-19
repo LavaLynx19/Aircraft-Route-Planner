@@ -39,7 +39,13 @@ from config import REPO_ROOT, servers_config
 from runner import run_guard
 
 HEALTH_TIMEOUT_SECONDS = 3
-STARTUP_BUDGET_SECONDS = 90  # `go run` compiles before it binds
+# `go run` compiles before it binds. A warm build cache makes that instant, but
+# the cache key includes the environment, so the first build under launchd's
+# minimal PATH is a full rebuild: measured 103s on 2026-09-19, against the old
+# 90s budget, which reported a restart as failed while it was still compiling.
+# Any toolchain or environment change re-cools the cache, so the budget carries
+# the margin rather than assuming a warm one.
+STARTUP_BUDGET_SECONDS = 180
 SHUTDOWN_BUDGET_SECONDS = 15
 POLL_INTERVAL_SECONDS = 2
 

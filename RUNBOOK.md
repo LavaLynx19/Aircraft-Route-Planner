@@ -86,11 +86,15 @@ sqlite3 ingest/data/opensky_cache.db \
    WHERE substr(fetched_at,1,7)=strftime('%Y-%m','now');"
 ```
 
-**Known broken as of 2026-09-19: the restart step.** `run-server.sh` execs `go`, which is not on the
-minimal `PATH` launchd gives a job, so the chain stops a running server and then fails to bring it back,
-ending `--- run RESTART_FAILED ... ---` with `exec: go: not found` in `ingest/data/api-<profile>.log`. Until
-that is fixed, restart a server by hand after a refresh (`./scripts/run-server.sh openflights`). The
-alarm fires correctly, so the failure is loud rather than silent.
+**The restart step was broken until 2026-09-19** and is worth knowing about, because both causes recur.
+launchd gives a job the bare `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which holds no Go toolchain, so the
+chain stopped a running server and could not start it again (`exec: go: not found` in
+`ingest/data/api-<profile>.log`, then `--- run RESTART_FAILED ... ---`). `run-server.sh` now resolves the
+binary itself — set `GO_BIN` if Go lives somewhere unusual. The second cause: `go run` compiles before it
+binds, and the build cache is keyed partly on the environment, so the first run under launchd rebuilt
+everything (103s, against what was then a 90s budget) and the chain called it failed mid-compile.
+`refresh.STARTUP_BUDGET_SECONDS` is 180 for that reason; expect one slow restart after a Go upgrade.
+A failed restart alarms and names the profile and port, so it is loud rather than silent.
 
 Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), Docker containers, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and

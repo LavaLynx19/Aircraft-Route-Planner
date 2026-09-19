@@ -926,14 +926,22 @@ flips as normal.
 
 #### 6.20 Found During the Phase 5 Verification (2026-09-19)
 
-- [ ] **The refresh chain cannot restart a server.** Its restart step ran for real for the first time on
+- [x] **The refresh chain cannot restart a server** — **fixed 2026-09-19.** Its restart step ran for real for the first time on
       2026-09-19 and failed: `run-server.sh: line 32: exec: go: not found`, logged to
       `ingest/data/api-openflights.log`, then `--- run RESTART_FAILED ... not healthy on :8080 within 90s`.
       launchd gives a job the bare `/usr/bin:/bin:/usr/sbin:/sbin`, and Homebrew's go is at
       `/opt/homebrew/bin/go`. Every earlier run logged "no API server running, nothing to restart", which is
       why 6.6 never caught it. The alarm itself worked. Candidate fixes: resolve the interpreter in
       `run-server.sh`, set `PATH` in the plist, or pass an environment from `refresh._start` — needs a
-      decision, and RUNBOOK §4's claim that the chain restarts running servers is wrong until then
+      decision, and RUNBOOK §4's claim that the chain restarts running servers is wrong until then.
+      **Fixed in `run-server.sh`**, which resolves the toolchain itself (`GO_BIN`, then `command -v go`,
+      then the usual install paths): the plist is not in this repository, and cron would hit the same
+      minimal PATH. **A second cause surfaced during the fix:** the first `go run` under launchd's
+      environment was a full rebuild, because the build-cache key includes the environment — 103s
+      measured, against a 90s startup budget, so the chain declared a restart failed while it was still
+      compiling. `refresh.STARTUP_BUDGET_SECONDS` is now 180. Verified end to end by kickstarting the
+      real agent against a running server: `--- run OK: 54024 edges served, 5550 marked stale;
+      restarted 1 server(s) ---`, the server back in ~5s serving a newer snapshot
 - [ ] **The country tab silently applies the other tab's aircraft filter.** Both tabs share one
       `state.aircraft` (`web/src/controls.js`), but each renders its own input, so after searching 388 on
       the airport tab, a UK→United States country search returns only A380 pairs while its aircraft box
