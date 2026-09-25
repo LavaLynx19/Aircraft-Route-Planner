@@ -533,6 +533,9 @@ flights — and route discovery saturates fast: a single 12h window at ZSPD retu
 departures. Halving temporal coverage to double the sweep rate is the better trade here, and
 alternating the offset yields full-day coverage every ~46 days anyway.
 
+**Queue priority within the 443 (2026-09-24):** the schedules queue is no longer round-robin — a
+priority tier runs at 2× the tail's rate. See Section 4.1.7.
+
 **What flips the half (amended 2026-09-17).** The next visit takes the other half after any
 *resolved* visit, meaning `ok` or `empty` — the same pair that marks a window as already collected. A
 failed visit collected nothing, so it retries the same half. A window with no departures comes back
@@ -768,6 +771,142 @@ the third is what makes the first two safe:
 being observed for one tail cycle is not necessarily gone — the next sweep may simply not have
 reached it yet. Re-observing an edge inside the grace period clears the mark, so a route that
 reappears is un-marked rather than deleted and re-created, preserving its identity and history.
+Section 4.1.7 (2026-09-24) tiers the schedules queue and restates this rationale as *at least ~1.5
+visits of the longest tier cycle*; at the adopted 2× that cycle is 31.2 days, and the constant is
+revisited if any tier cycle passes ~40 days.
+
+#### 4.1.7 Queue Priority Within the Blackout Set
+
+**Decision date:** 2026-09-24. Amends Section 4.1.5 (the flat schedules queue) and restates the
+rationale of Section 4.1.6's grace period without changing its value. Closes Sep review M6.
+
+**The question asked.** M6 observed that `config.BLACKOUT_ICAO_PREFIXES = ("Z","U")` routes 443 airports
+to AeroDataBox permanently, that `load_graph.aggregate()` discards OpenSky rows for those origins, and
+that the partition — derived once from ~375 fetch attempts — is therefore self-sealing: no data path
+exists by which the system could produce evidence against it.
+
+**What measurement found.** The partition is substantively correct, and the coarse prefix rule was
+right for reasons its 14-attempt `U` sample did not show:
+
+| check | result |
+|---|---|
+| Were the 14 `U` attempts small airports? | No — ranks 3, 12, 16, 32, 33, 35, 40, 43, 46, 50 and 51 of the 443. UUDD Domodedovo returned 4 departures in a 2-day window, UUEE 20, ULLI 6, UUWW 26 |
+| Is low `U` yield an ADS-B effect or a traffic effect? | Both. `schedules_fetch_log`: `Z` 155 visits, 125 ok, **43.0 rows per ok**; `U` 135 visits, 86 ok, **16.6**. Russia is thinner in *both* sources |
+| Independent corroboration | AeroDataBox's coverage page (Section 4.1.5): China 95% schedules / **35%** live, Russia 100% / **74%** — two different phenomena under one prefix rule |
+
+Moscow's three main airports returning 4, 20 and 26 departures across two full days is genuine
+receiver darkness. `U` stays in the blackout set.
+
+**The defect is observability, not staticness.** Re-deriving the partition today returns `("Z","U")`.
+What was missing is not a feedback loop but any way to *see* that the answer still holds without an
+ad-hoc query. The fix is to stop freezing derived quantities as constants wherever the data to derive
+them already arrives for free — and to separate that free evidence from the evidence that costs credits.
+
+**Decision 1 — tier the schedules queue; do not evict.** The 443 airports differ widely in yield but
+are scheduled round-robin, so hub cadence is pinned to tail cadence. Section 4.1.5 already solved this
+shape on the OpenSky side with a hub/tail split, without evicting anyone; the schedules queue inherits
+it. A priority tier of about 150 airports is served at **2× the tail's per-airport rate**, within the
+same 600 units/month. Maturity below is 8 samples, counted from scratch:
+
+| approach | priority tier | remainder | Russia stays observable |
+|---|---|---|---|
+| flat round-robin (before) | 23.3-day cycle / 187 days | same | yes |
+| **tiered 2× (adopted)** | **15.6 / 125** | **31.2 / 250** | **yes** |
+| tiered 3× | 13.0 / 104 | 39.1 / 313 | yes |
+| evict `U` from AeroDataBox | 12.5 / 100 | — | **no** — 205 airports move to the source that measured 4 departures at Domodedovo |
+
+**2×, not 3×, on the scarcity argument.** Extra hub cadence buys frequency precision more than new
+routes: route discovery at a hub saturates fast (one 12h window at ZSPD returned 518 departures). A thin
+`U` airport at 16.6 rows per ok needs the opposite — more visits, both to keep an intermittent route
+inside its recency window between sightings and to accumulate the three distinct calendar weeks that
+keep it valid beyond that window (Section 4.1.3). It also has no alternative source if AeroDataBox
+under-samples it. Scarcity buys cadence rather than losing it.
+
+**Decision 2 — tier membership is re-derived every run.** A hard-coded list of priority airports would be
+the same object M6 complained about, in new wording. The ranking key follows the evidence available:
+
+- once an airport has **at least two successful visits**, its own measured **rows per ok** from
+  `schedules_fetch_log` — yield from a single half-0 visit is too noisy to rank on;
+- before that, the median rows per ok of its traffic-rank band (bands of 50 ranks): the traffic rank
+  expressed in the same unit, so measured and unmeasured airports compete on one scale. With no
+  successful visit anywhere, the tier is simply the busiest airports by traffic rank.
+
+The merge rule was settled during implementation (2026-09-24). Ranking each group by its own
+percentile was rejected: with five measured airports, a strong hub could leave the tier merely for
+coming third of five. **Tiering also waits for the first sweep to complete** — every airport attempted
+at least once. Its purpose is revisit cadence, and splitting the budget earlier would only slow first
+coverage of the airports not yet visited; until then the queue stays round-robin.
+
+Accepted cost: the traffic rank derives from 2014 OpenFlights data until an airport crosses the
+two-visit threshold. Two numbers do stay fixed, deliberately: the tier size (~150) and the 2×
+multiplier. Unlike the partition, they are budget policy rather than claims about the world — no
+measurement can show them wrong, only that another split serves better. They are revisited at the
+Decision 5 checkpoint and when the first full sweep changes the yield picture.
+
+**Decision 3 — the 60-day grace period stays; its rationale is restated.** Tiering does not threaten it.
+An edge is marked stale only once it falls out of validity — fewer than three distinct weeks *and*
+unseen within its airport's recency window, `max(14, 2 × median gap)` (Section 4.1.3,
+`load_graph.shape_valid`) — so an edge its recency window still counts as current is never marked, and
+never swept. The grace only runs after that, and its job is narrower: to give a marked route at least
+one more visit in which to reappear before deletion. At 2× the longest cycle is the schedules tail's
+31.2 days, so 60 days covers about 1.9 visits, against 2.0 before. The rationale is therefore restated
+as *at least ~1.5 visits of the longest tier cycle*, and the constant is revisited if any tier cycle
+passes ~40 days. An earlier draft of this decision made the grace a derived quantity, on the claim that
+tiering could sweep edges still inside their recency window; the code shows it cannot, so the constant
+stays.
+
+**Decision 4 — separate what is observed for free from what costs credits.** M6 conflated two signals:
+
+| signal | source | cost | answers |
+|---|---|---|---|
+| regional yield drift | `schedules_fetch_log`, 19 visits/day across the blackout set | **free, always on** | does traffic still exist there, and is it changing? |
+| ADS-B receiver coverage | an OpenSky request to a blackout airport | **30 credits each**, taken from the tail cycle | can OpenSky see it *now*? |
+
+Only the second can detect what M6 actually worried about, and it has the lower base rate. The free
+signal runs continuously; the paid one runs only at the checkpoint below.
+
+**Decision 5 — observe continuously, act only at a reviewed checkpoint.** No automatic loop. The
+partition has just measured correct; receiver-density change in Russia and China has a low base rate on
+the horizon that matters; and observing carries no risk — a probe reads `status` and `flight_count` from
+the log and creates no edges, so it cannot touch the Section 2.2.1 dedup invariant or the Section 4.1.6
+sweeper. Acting is where the risk lives. A moved airport's old edges age out within about two of its
+old cycles plus the grace period, while the incoming source re-establishes a route only when it first
+sees it — one sighting inside the recency window makes an edge valid (Section 4.1.3). For a genuinely
+dark region that sighting never comes: moving Russia to OpenSky would retire its schedule-derived edges
+and replace them with almost nothing, which is the outcome Decision 1 exists to avoid.
+
+The gate:
+
+1. **Mandatory before `promote.py --yes` (Phase 6.4).** A manual, paid OpenSky probe of **10–15
+   airports**: each blackout country's top hubs plus a rotating few, so a fixed sentinel set cannot be
+   dark while its region is not.
+2. **Rule to move a region out of the blackout set:** its flights-per-success reaches a stated share of
+   the non-blackout median **across two probe rounds**. Requiring two rounds is the hysteresis that
+   keeps the partition from flapping during the run-up to 6.4.
+3. **Early trigger:** the checkpoint also fires ahead of schedule if the free signal (Decision 4) shows a
+   region's yield shifting sharply across two consecutive sweeps.
+
+**Open parameters, deliberately unset.** Fixing these without data would repeat M6's error: the *stated
+share* of the non-blackout median in rule 2, and the definition of a *sharp shift* in rule 3. Both are
+to be set from `schedules_fetch_log` once the first full sweep completes and half-1 sampling has begun,
+and recorded here when set.
+
+**Consequence for Phase 6.4, stated plainly.** No multiplier makes China mature by November 2026. At 2×
+the priority tier reaches 8 samples around late January 2027 counted from scratch — somewhat earlier in
+practice, since half-0 visits already count (211 of 443 airports visited and 290 of 600 monthly units
+used as of 2026-09-19). **Chinese and Russian routes therefore promote after the OpenSky hub subgraph**,
+where every hub has been visited at least once (300/300) and hub *maturity* is the ~Nov 2026 milestone.
+PLAN Phase 6.4 is already staged this way; this record makes the reason explicit.
+
+**Residual risk.** Decision 2's ranking key changes basis when an airport reaches its second successful
+visit, so tier membership can move as evidence accumulates — an airport can drop out of the priority
+tier mid-accumulation. That is intended, since it is what makes the ordering self-correcting, but it
+should be watched once the first sweep completes. If churn proves disruptive, the remedy is a rank
+buffer or a minimum dwell time, not a return to a frozen list.
+
+**Section 12.5.5** ("Route deduplication — Resolved 2026-09-05") stays valid: Decision 5 keeps the
+partition static in practice, so the disjointness the dedup fix relies on is undisturbed. If a region is
+ever moved at a checkpoint, that bullet reopens and needs the source-priority rule it sketches.
 
 ### 4.2 Aircraft Code Normalization
 
