@@ -128,4 +128,11 @@ def aerodatabox_config() -> dict:
         "daily_calls": int(os.environ.get("ADB_DAILY_CALLS", "19")),
         # Held back so a long month cannot leave zero units for a manual probe.
         "unit_reserve": int(os.environ.get("ADB_UNIT_RESERVE", "20")),
+        # Queue priority within the blackout set (ARCHITECTURE.md §4.1.7): the most
+        # productive ~150 airports are revisited at 2x the rest's per-airport rate.
+        # Budget policy, not a measurement — revisited at the Phase 6.4 checkpoint.
+        "priority_tier_size": int(os.environ.get("ADB_PRIORITY_TIER_SIZE", "150")),
+        "priority_rate_multiplier": float(
+            os.environ.get("ADB_PRIORITY_RATE_MULTIPLIER", "2")
+        ),
     }

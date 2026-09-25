@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import fetch_flights
 import fetch_schedules
+import pytest
 from conftest import (
     add_airport,
     add_attempt,
@@ -278,3 +279,79 @@ class TestSchedulesBatchIsNotShortened:
         add_schedule_attempt(conn, "ZOWED", status="ok", days_ago=10, half=0)
 
         assert fetch_schedules.due_airports(conn, 1) == [("ZOWED", 1)]
+
+
+# A tier of 2 at twice the rate of the rest, small enough to reason about by hand.
+TIER_CFG = {"priority_tier_size": 2, "priority_rate_multiplier": 2}
+
+
+class TestSchedulesTiering:
+    """Queue priority within the blackout set (ARCHITECTURE.md §4.1.7, Decisions 1-2)."""
+
+    def test_split_gives_a_tier_airport_twice_the_rate(self):
+        """The production shape: 150 priority airports and 293 others at 19 calls."""
+        tier, rest = fetch_schedules.split_budget(19, 150, 293, 2)
+        assert (tier, rest) == (10, 9)
+        # Whole calls only, so the realised ratio is near 2 rather than exactly 2.
+        assert (tier / 150) / (rest / 293) == pytest.approx(2, rel=0.1)
+
+    def test_split_edge_cases(self):
+        assert fetch_schedules.split_budget(0, 150, 293, 2) == (0, 0)
+        assert fetch_schedules.split_budget(19, 0, 443, 2) == (0, 19)
+        assert fetch_schedules.split_budget(19, 443, 0, 2) == (19, 0)
+        # A multiplier of 1 shares calls in proportion to airport counts.
+        assert fetch_schedules.split_budget(19, 150, 293, 1) == (6, 13)
+
+    def test_without_any_yield_the_tier_is_the_busiest(self):
+        rows = [("A", 0, 0, None), ("B", 1, 0, None), ("C", 2, 0, None)]
+        assert fetch_schedules.rank_priority(rows, 2) == {"A", "B"}
+
+    def test_a_productive_airport_outranks_a_busier_band(self):
+        """Measured yield and band priors share one unit, so they compete directly."""
+        rows = [
+            ("BUSY1", 0, 1, 10.0),
+            ("BUSY2", 1, 1, 12.0),
+            ("QUIET", 60, 2, 90.0),  # two successes: its own yield counts
+        ]
+        assert fetch_schedules.rank_priority(rows, 2) == {"QUIET", "BUSY1"}
+
+    def test_own_yield_counts_only_from_the_second_success(self):
+        """One 12h window is too noisy to rank on; the band median stands in for it."""
+        band_zero = [("A", 0, 1, 50.0), ("B", 2, 1, 60.0)]
+        elsewhere = [("FAR", 100, 1, 20.0)]
+        one_visit = band_zero + [("LOW", 1, 1, 5.0)] + elsewhere
+        two_visits = band_zero + [("LOW", 1, 2, 5.0)] + elsewhere
+        assert "LOW" in fetch_schedules.rank_priority(one_visit, 2)
+        assert "LOW" not in fetch_schedules.rank_priority(two_visits, 2)
+
+    def test_queue_stays_flat_until_the_first_sweep_completes(self, conn):
+        """Tiering is for revisits; before then it would only slow first coverage."""
+        for i in range(4):
+            add_schedule_airport(conn, f"Z00{i}", rank=i)
+        add_schedule_attempt(conn, "Z000", status="ok", days_ago=5)
+
+        queue, how = fetch_schedules.plan_queue(conn, 3, TIER_CFG)
+        assert queue == fetch_schedules.due_airports(conn, 3)
+        assert how.startswith("flat until the first sweep completes: 1 of 4")
+
+    def test_once_every_airport_is_tried_the_tier_gets_its_share(self, conn):
+        for i in range(6):
+            icao = f"Z00{i}"
+            add_schedule_airport(conn, icao, rank=i)
+            add_schedule_attempt(conn, icao, status="ok", days_ago=20 + i, half=0)
+
+        # A tier of 2 at 2x the rate of the other 4: split_budget(4, 2, 4, 2) == (2, 2).
+        queue, how = fetch_schedules.plan_queue(conn, 4, TIER_CFG)
+        assert how.startswith(
+            "tiered: 2 calls to 2 priority airports, 2 to the other 4"
+        )
+        assert {icao for icao, _ in queue[:2]} == {"Z000", "Z001"}
+        assert len(queue) == 4
+        # The half still flips after a resolved visit, inside every tier.
+        assert all(half == 1 for _, half in queue)
+
+    def test_only_restricts_the_queue_to_one_tier(self, conn):
+        for icao in ("ZAAA", "ZBBB", "ZCCC"):
+            add_schedule_airport(conn, icao)
+        due = fetch_schedules.due_airports(conn, 5, only={"ZBBB"})
+        assert [icao for icao, _ in due] == ["ZBBB"]
