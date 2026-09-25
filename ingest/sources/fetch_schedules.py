@@ -18,8 +18,11 @@ Resumable: schedules_fetch_log records every attempt keyed by (airport, date,
 half); re-runs skip halves already 'ok'.
 """
 
+from __future__ import annotations
+
 import json
 import sqlite3
+import statistics
 import time
 import urllib.error
 import urllib.parse
@@ -121,7 +124,7 @@ def units_used_this_month(conn: sqlite3.Connection) -> int:
     return row[0] if row else 0
 
 
-def due_airports(conn: sqlite3.Connection, limit: int) -> list:
+def due_airports(conn: sqlite3.Connection, limit: int, only: set | None = None) -> list:
     """Never-attempted first (by traffic rank), then longest-unvisited.
 
     Returns (icao, day_half). Priority is `fetch_queue.order_due`, by last
@@ -135,6 +138,9 @@ def due_airports(conn: sqlite3.Connection, limit: int) -> list:
     observation, so the next visit samples the other half, where the flights may
     be. A failed attempt collected nothing, so the next try covers the same half
     rather than skip it.
+
+    `only` restricts the queue to one tier's airports (`plan_queue`); the
+    ordering and window rules are the same inside every tier.
     """
     # Order every candidate, then drop already-resolved windows, then truncate.
     # This used to over-fetch `limit * 3` rows and filter only those, which came
@@ -155,6 +161,9 @@ def due_airports(conn: sqlite3.Connection, limit: int) -> list:
         """
     ).fetchall()
 
+    if only is not None:
+        rows = [r for r in rows if r[0] in only]
+
     out = []
     for icao, _rank, _last_attempt, last_half in order_due(rows):
         if len(out) >= limit:
@@ -164,6 +173,119 @@ def due_airports(conn: sqlite3.Connection, limit: int) -> list:
             continue
         out.append((icao, half))
     return out
+
+
+# Queue priority within the blackout set — ARCHITECTURE.md §4.1.7, Decisions 1-2.
+#
+# One unit for every airport: rows stored per successful visit. An airport's own
+# figure counts only from its second success, because a single 12h window is too
+# noisy to rank on; before that it takes the median of its traffic-rank band, so
+# measured and unmeasured airports compete on the same scale. (Ranking each group
+# by its own percentile was rejected: with five measured airports, a strong hub
+# could leave the tier merely for coming third of five.)
+YIELD_MIN_VISITS = 2
+RANK_BAND = 50
+
+
+def rank_priority(rows: list, size: int) -> set:
+    """Pick the priority tier from `(icao, traffic_rank, ok_visits, rows_per_ok)` rows.
+
+    With no successful visit anywhere there is no yield to use, and the tier is
+    simply the `size` busiest airports by traffic rank.
+    """
+    observed = [r for r in rows if r[2] >= 1]
+    bands: dict = {}
+    for _icao, rank, _ok, per_ok in observed:
+        bands.setdefault(rank // RANK_BAND, []).append(per_ok)
+    band_prior = {band: statistics.median(v) for band, v in bands.items()}
+    overall = statistics.median([r[3] for r in observed]) if observed else None
+
+    def score(row: tuple) -> float:
+        _icao, rank, ok, per_ok = row
+        value = (
+            per_ok
+            if ok >= YIELD_MIN_VISITS
+            else band_prior.get(rank // RANK_BAND, overall)
+        )
+        return float("-inf") if value is None else value
+
+    ordered = sorted(rows, key=lambda r: (-score(r), r[1]))
+    return {r[0] for r in ordered[:size]}
+
+
+def priority_tier(conn: sqlite3.Connection, size: int) -> set:
+    """The priority tier, re-derived from the log on every run (Decision 2)."""
+    rows = conn.execute(
+        """
+        SELECT sa.icao,
+               sa.rank,
+               COALESCE(SUM(sl.status = 'ok'), 0) AS ok_visits,
+               SUM(CASE WHEN sl.status = 'ok' THEN sl.flight_count END) AS ok_rows
+        FROM schedules_airports sa
+        LEFT JOIN schedules_fetch_log sl ON sl.airport_icao = sa.icao
+        GROUP BY sa.icao
+        """
+    ).fetchall()
+    return rank_priority(
+        [
+            (icao, rank, ok, (ok_rows / ok) if ok else None)
+            for icao, rank, ok, ok_rows in rows
+        ],
+        size,
+    )
+
+
+def split_budget(budget: int, tier_n: int, rest_n: int, multiplier: float) -> tuple:
+    """Divide a run's calls so a tier airport is visited `multiplier` times as often.
+
+    A tier's per-airport rate is its calls over its airports, so the split solves
+    tier_calls / tier_n = multiplier * rest_calls / rest_n. Unspent calls are not
+    moved between tiers: the cap is monthly, so they remain for later runs.
+    """
+    if budget <= 0:
+        return 0, 0
+    if tier_n <= 0:
+        return 0, budget
+    if rest_n <= 0:
+        return budget, 0
+    weight = multiplier * tier_n
+    tier_calls = round(budget * weight / (weight + rest_n))
+    return tier_calls, budget - tier_calls
+
+
+def plan_queue(conn: sqlite3.Connection, budget: int, cfg: dict) -> tuple:
+    """This run's queue, and a one-line description of how it was built.
+
+    Tiering waits for the first sweep to finish. Its purpose is revisit cadence;
+    before every airport has been tried once, splitting the budget would only
+    slow first coverage of the airports still unvisited.
+    """
+    airports = {icao for (icao,) in conn.execute("SELECT icao FROM schedules_airports")}
+    attempted = {
+        icao
+        for (icao,) in conn.execute(
+            "SELECT DISTINCT airport_icao FROM schedules_fetch_log"
+        )
+    } & airports
+    if len(attempted) < len(airports):
+        return (
+            due_airports(conn, budget),
+            f"flat until the first sweep completes: {len(attempted)} of {len(airports)} attempted",
+        )
+
+    tier = priority_tier(conn, cfg["priority_tier_size"])
+    rest = airports - tier
+    tier_calls, rest_calls = split_budget(
+        budget, len(tier), len(rest), cfg["priority_rate_multiplier"]
+    )
+    queue = due_airports(conn, tier_calls, only=tier) + due_airports(
+        conn, rest_calls, only=rest
+    )
+    how = (
+        f"tiered: {tier_calls} calls to {len(tier)} priority airports, "
+        f"{rest_calls} to the other {len(rest)}"
+    )
+    return queue, how
 
 
 def _window_resolved(conn: sqlite3.Connection, icao: str, half: int) -> bool:
@@ -316,11 +438,11 @@ def run() -> dict:
     used = units_used_this_month(conn)
     spendable = cfg["monthly_units"] - cfg["unit_reserve"] - used
     budget = max(0, min(cfg["daily_calls"], spendable))
-    queue = due_airports(conn, budget)
+    queue, how = plan_queue(conn, budget, cfg)
 
     print(
         f"fetch_schedules: {n_airports} blackout airports, {used} units used this "
-        f"month, {budget} calls this run"
+        f"month, {budget} calls this run — {how}"
     )
 
     stats = {
