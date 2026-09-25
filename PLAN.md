@@ -955,6 +955,54 @@ flips as normal.
 
 ---
 
+#### 6.22 Tiered Schedules Queue and Blackout Observability (ARCHITECTURE.md §4.1.7, 2026-09-24)
+
+Implements the decision record that closed Sep review M6. Numbered 6.22 because 6.21 is taken on the
+unmerged `fix/review-findings-2026-09-19` branch. Decision 3 (keep the 60-day grace) needs no code.
+
+- [x] **T1 — tier the schedules queue (Decisions 1 and 2).** Split each run's call budget between a
+      priority tier and the rest so the tier's per-airport rate is 2× the tail's, mirroring the OpenSky
+      hub/tail split. Tier size (~150) and multiplier (2) are named policy parameters in `config.py`, not
+      buried literals. Membership is recomputed every run: the ranking key is traffic rank, switching to
+      measured rows per ok from `schedules_fetch_log` once an airport has at least two successful visits.
+      Each tier orders its own airports through `fetch_queue.order_due`, and the half-flip and
+      window-resolved rules apply unchanged. **Done 2026-09-24**, with two changes made while coding,
+      both now recorded in §4.1.7: (1) the key merge — this plan first chose per-group percentiles,
+      rejected because with five measured airports a strong hub could leave the tier for coming third of
+      five; every airport now scores in rows per ok, its own after two successes and its traffic-rank
+      band's median before; (2) tiering waits for the first sweep to complete, so first coverage is not
+      slowed. `split_budget`, `rank_priority`, `priority_tier`, `plan_queue` in `fetch_schedules.py`;
+      policy knobs `ADB_PRIORITY_TIER_SIZE`/`ADB_PRIORITY_RATE_MULTIPLIER`. 8 tests, 125 pass on CLT
+      3.9, ruff clean. **Live, read-only:** the next run stays round-robin (283 of 443 attempted) with a
+      queue identical to before the change; tiering starts on its own in ~8 runs (~2026-10-02) at 10
+      calls to the tier (15.0-day cycle) and 9 to the rest (32.6 days). Today's computed tier is 69
+      Chinese and 47 Russian airports, since band medians pool both countries until per-airport yields
+      exist
+- [x] **T2 — make the free signal visible (Decision 4).** A read-only report of rows per ok and
+      empty rate by country across successive sweeps, from `schedules_fetch_log`, so "does the partition
+      still hold" is answerable without an ad-hoc query. No alerting: the *sharp shift* threshold is an
+      open parameter of §4.1.7. **Done 2026-09-24:** `ingest/sources/blackout_report.py` opens the cache
+      with `mode=ro`, so a write raises. A sweep is an airport's k-th *resolved* (ok/empty) visit, and an
+      error retry stays in the sweep it failed to resolve, so a daily-retried failure is not counted as
+      extra sweeps. A half1 column shows the day-half mix; compare sweep k with k+2. Cells under 5 visits
+      are marked `*`. 7 tests, 132 pass on CLT 3.9, ruff clean. **Live:** 298 visits, all in sweep 1:
+      72% ok, 6% empty, 31.9 rows/ok; China 80% ok at 42.5 rows/ok, Russia 73% at 17.2. Uzbekistan is 0%
+      ok (12 of 14 visits error, UZTT failing daily)
+- [ ] **T3 — the checkpoint probe (Decision 5, rules 1–2).** A manual script that spends OpenSky credits
+      on 10–15 blackout airports (each country's top hubs plus a rotating few) and reports
+      flights-per-success against the non-blackout median. **It must write its own table, not
+      `fetch_log`:** `recency_days_by_airport` reads successful `fetch_log` rows for every airport, so
+      probe rows there would shift a blackout airport's recency window and change which of its
+      AeroDataBox edges stay valid — breaking §4.1.7's claim that probing cannot touch the sweeper.
+      Reports only; moving a region stays a human edit to `BLACKOUT_ICAO_PREFIXES`
+- [ ] **T4 — make the checkpoint mandatory (Decision 5).** `promote.py` refuses to run unless two probe
+      rounds are recorded. Open parameter: how recent those rounds must be
+- [ ] **T5 — RUNBOOK §4** documents the report and the probe, and states that the probe costs credits
+- [ ] Verify: tests per task; for T1, the live queue before and after on a read-only database, and the
+      first unattended schedules run after it lands
+
+---
+
 ## Build Order (Commit Sequence)
 
 ```mermaid
