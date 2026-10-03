@@ -328,8 +328,42 @@ def window_for(day_half: int) -> tuple:
     return offset, date
 
 
+def parse_quota(headers, now: datetime | None = None) -> dict | None:
+    """The provider's unit accounting from a response's headers, or None.
+
+    These headers are the only source of unit accounting (ARCHITECTURE.md
+    §4.1.8): the fetcher holds no unit cost and no period of its own, since both
+    were assumed wrong until 2026-10-03 — the call costs 2 units, not 1, and the
+    period is the subscription anniversary, not the calendar month.
+
+    None when any of the three is absent or not an integer. Timeouts, connection
+    resets and the per-second throttle 429 carry none of them.
+    """
+    try:
+        remaining = int(headers.get("X-RateLimit-API-Units-Remaining"))
+        limit = int(headers.get("X-RateLimit-API-Units-Limit"))
+        reset_seconds = int(headers.get("X-RateLimit-API-Units-Reset"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    now = now or datetime.now(timezone.utc)
+    return {
+        # An exhausted quota reports -1.
+        "remaining": max(0, remaining),
+        "limit": limit,
+        # Sent as seconds from now; stored absolute so it survives between runs.
+        "reset_at": (now + timedelta(seconds=reset_seconds)).isoformat(
+            timespec="seconds"
+        ),
+        "observed_at": now.isoformat(timespec="seconds"),
+    }
+
+
 def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
-    """Return (status, departures). status ∈ ok|empty|error|quota_exceeded."""
+    """Return (status, departures, quota).
+
+    status ∈ ok|empty|error|throttled|quota_exceeded; quota is `parse_quota`'s
+    result for the response, None when no response carried the unit headers.
+    """
     query = urllib.parse.urlencode(
         {
             "offsetMinutes": offset_minutes,
@@ -350,9 +384,11 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
         },
     )
     http_status = None
+    quota = None
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
             http_status = resp.status
+            quota = parse_quota(resp.headers)
             if http_status == 204:
                 # The API's documented answer for a window with no departures
                 # (OpenAPI GetAirportFlightsRelative), with an empty body. Parsing
@@ -361,12 +397,13 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
                 # half on every visit and its other half was never sampled. 42
                 # responses logged this way by 2026-09-17, 21 of 76 calls in that
                 # week's four runs.
-                return "empty", []
+                return "empty", [], quota
             body = json.load(resp)
         departures = body.get("departures") or []
-        return ("ok" if departures else "empty"), departures
+        return ("ok" if departures else "empty"), departures, quota
     except urllib.error.HTTPError as e:
         detail = e.read()[:200].decode("utf-8", "replace").strip()
+        quota = parse_quota(e.headers)
         if e.code == 429:
             # 429 is overloaded: the per-second limiter and the monthly quota
             # share it. Only the latter should stop the run — treating a
@@ -374,12 +411,15 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
             # report it as a normal quiet run.
             if "per second" in detail.lower():
                 print(f"  {icao}: throttled, backing off")
-                return "throttled", []
-            return "quota_exceeded", []
+                return "throttled", [], quota
+            # The body names which quota and which plan. Not printing it left
+            # the 2026-09-21 stall undiagnosable from the log.
+            print(f"  {icao}: HTTP 429: {detail}")
+            return "quota_exceeded", [], quota
         # The body is what identifies a Cloudflare block (1010) or an
         # unsubscribed key; the status alone is not diagnostic.
         print(f"  {icao}: HTTP {e.code}: {detail}")
-        return "error", []
+        return "error", [], quota
     except (OSError, json.JSONDecodeError) as e:
         # OSError, not TimeoutError: on Python 3.9 socket.timeout is a sibling of
         # TimeoutError under OSError, not an alias, so the narrower form lets one
@@ -387,7 +427,7 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
         # arrived, is what tells a malformed body apart from a network failure.
         where = f" (HTTP {http_status})" if http_status else ""
         print(f"  {icao}: {type(e).__name__}{where}: {e}")
-        return "error", []
+        return "error", [], quota
 
 
 def store_departures(
@@ -459,11 +499,11 @@ def run() -> dict:
     for i, (icao, half) in enumerate(queue):
         offset, window_date = window_for(half)
         calls = 1
-        status, flights = fetch_departures(cfg["api_key"], icao, offset)
+        status, flights, _quota = fetch_departures(cfg["api_key"], icao, offset)
         if status == "throttled":
             time.sleep(REQUEST_PAUSE_SECONDS * 3)
             calls += 1
-            status, flights = fetch_departures(cfg["api_key"], icao, offset)
+            status, flights, _quota = fetch_departures(cfg["api_key"], icao, offset)
             if status == "throttled":  # still throttled: record, keep going
                 status = "error"
         stats["units_spent"] += calls
