@@ -1054,8 +1054,10 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
       responses, an exhausted row past its reset, a passed reset not reported as the next one, an
       expired row, and a throttle retry whose second reply carries the headers. 156 pass on CLT 3.9,
       ruff clean
-- [ ] **T5 — RUNBOOK §4** replaces the "sum `attempts`" accounting note and the "monthly" wording with
-      the header-based figure and the anniversary reset, and says how to read the stored row
+- [x] **T5 — RUNBOOK §4** replaces the "sum `attempts`" accounting note and the "monthly" wording with
+      the header-based figure and the anniversary reset, and says how to read the stored row. **Done
+      2026-10-03:** the accounting note, the run-line wording, the `schedules_quota` query in place of
+      the `SUM(attempts)` one, the agent table row and the kickstart note
 - [ ] Verify: pytest and ruff clean; then the first unattended run after the reset (~2026-10-06
       04:30 UTC) reports a provider figure that drops by 2 per call, and the stored row matches the
       last response
