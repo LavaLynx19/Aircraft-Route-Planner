@@ -355,3 +355,62 @@ class TestSchedulesTiering:
             add_schedule_airport(conn, icao)
         due = fetch_schedules.due_airports(conn, 5, only={"ZBBB"})
         assert [icao for icao, _ in due] == ["ZBBB"]
+
+
+class TestStoredQuota:
+    """The pre-run budget is the last value the provider reported (§4.1.8)."""
+
+    NOW = datetime(2026, 10, 10, 4, 30, 0, tzinfo=timezone.utc)
+
+    def _quota(self, remaining, *, reset_in_days=20.0, observed_days_ago=1.0):
+        return {
+            "remaining": remaining,
+            "limit": 600,
+            "reset_at": (self.NOW + timedelta(days=reset_in_days)).isoformat(),
+            "observed_at": (self.NOW - timedelta(days=observed_days_ago)).isoformat(),
+        }
+
+    def test_nothing_is_stored_before_the_first_response(self, conn):
+        assert fetch_schedules.load_quota(conn) is None
+
+    def test_a_saved_quota_round_trips(self, conn):
+        quota = self._quota(412)
+        fetch_schedules.save_quota(conn, quota)
+        assert fetch_schedules.load_quota(conn) == quota
+
+    def test_a_later_response_overwrites_the_row(self, conn):
+        fetch_schedules.save_quota(conn, self._quota(412))
+        fetch_schedules.save_quota(conn, self._quota(410))
+        rows = conn.execute("SELECT remaining FROM schedules_quota").fetchall()
+        assert rows == [(410,)]
+
+    def test_no_row_is_unknown_and_the_run_may_start(self):
+        assert fetch_schedules.known_units(None, self.NOW) is None
+        assert fetch_schedules.quota_allows_run(None, 20, self.NOW)
+
+    def test_a_current_row_above_the_reserve_allows_the_run(self):
+        stored = self._quota(412)
+        assert fetch_schedules.known_units(stored, self.NOW) == 412
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_current_row_at_the_reserve_blocks_the_run(self):
+        assert not fetch_schedules.quota_allows_run(self._quota(20), 20, self.NOW)
+        assert not fetch_schedules.quota_allows_run(self._quota(0), 20, self.NOW)
+
+    def test_a_passed_reset_means_the_full_limit_again(self):
+        """The 2026-10-01 case: an exhausted row must not outlive its period."""
+        stored = self._quota(0, reset_in_days=-0.5)
+        assert fetch_schedules.known_units(stored, self.NOW) == 600
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_row_older_than_the_age_limit_is_unknown(self):
+        """Headerless responses never refresh the row, so it must expire."""
+        age = fetch_schedules.QUOTA_MAX_AGE_DAYS + 0.1
+        stored = self._quota(0, observed_days_ago=age)
+        assert fetch_schedules.known_units(stored, self.NOW) is None
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_row_just_inside_the_age_limit_still_counts(self):
+        age = fetch_schedules.QUOTA_MAX_AGE_DAYS - 0.1
+        stored = self._quota(0, observed_days_ago=age)
+        assert not fetch_schedules.quota_allows_run(stored, 20, self.NOW)

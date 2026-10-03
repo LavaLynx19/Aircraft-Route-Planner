@@ -1018,11 +1018,16 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
       quota)`, the shape `fetch_flights.fetch_departures` already has. `run()` unpacks and ignores the
       quota until T3, so behaviour is unchanged apart from the 429 body line. 7 tests, 139 pass, ruff
       clean
-- [ ] **T2 — persist the last value seen (Decision 2).** A single-row table in the SQLite cache holding
+- [x] **T2 — persist the last value seen (Decision 2).** A single-row table in the SQLite cache holding
       `(remaining, limit, reset_at, observed_at)`, created in `init_db`. A pre-run gate returns whether
       the run may start: future `reset_at` → only if `remaining > ADB_UNIT_RESERVE`; past `reset_at` →
       full `limit`; no row → allowed; `observed_at` older than 7 days → expired, treated as no row. The
-      7 days is a named constant, not a buried literal
+      7 days is a named constant, not a buried literal. **Done 2026-10-03:** table `schedules_quota`
+      (one row, enforced by `CHECK (id = 1)`; the column is `unit_limit` because `limit` is an SQL
+      keyword); `save_quota`, `load_quota`, `known_units` and the gate `quota_allows_run` in
+      `fetch_schedules.py`; `QUOTA_MAX_AGE_DAYS = 7`. Nothing calls them yet — `run()` is wired in T3.
+      The gate-branch and overwrite tests listed under T4 were written here: 9 tests, 148 pass on CLT
+      3.9, ruff clean
 - [ ] **T3 — drive the run from the headers (Decisions 1–3).** In `run()`: plan the normal
       `ADB_DAILY_CALLS` queue with no units-to-calls conversion; overwrite the stored row after every
       response that carries headers, including the quota 429; stop once `remaining <= ADB_UNIT_RESERVE`;

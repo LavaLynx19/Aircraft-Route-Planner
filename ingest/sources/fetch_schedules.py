@@ -40,6 +40,11 @@ WINDOW_MINUTES = 720  # API hard cap: >12h returns HTTP 400
 # Cloudflare fronts this API and rejects urllib's default "Python-urllib/3.9"
 # signature with 403 / "error code: 1010". Identify the client honestly instead.
 USER_AGENT = "aircraft-route-planner/1.0"
+# A response without unit headers leaves the stored quota untouched, so a string
+# of runs that meet only timeouts would start from the same figure indefinitely.
+# Past this age the stored row is ignored and the first response re-learns it
+# (ARCHITECTURE.md §4.1.8, Decision 2).
+QUOTA_MAX_AGE_DAYS = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_schedules (
@@ -75,6 +80,16 @@ CREATE TABLE IF NOT EXISTS schedules_airports (
     country TEXT,
     rank INTEGER NOT NULL
 );
+
+-- The provider's unit accounting as of the last response that carried it.
+-- One row: the CHECK makes a second one impossible rather than merely unused.
+CREATE TABLE IF NOT EXISTS schedules_quota (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    remaining INTEGER NOT NULL,
+    unit_limit INTEGER NOT NULL,
+    reset_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
 """
 
 
@@ -102,6 +117,52 @@ def refresh_airports(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return len(airports)
+
+
+def save_quota(conn: sqlite3.Connection, quota: dict) -> None:
+    """Overwrite the stored row with a `parse_quota` result."""
+    conn.execute(
+        "INSERT OR REPLACE INTO schedules_quota "
+        "(id, remaining, unit_limit, reset_at, observed_at) VALUES (1,?,?,?,?)",
+        (quota["remaining"], quota["limit"], quota["reset_at"], quota["observed_at"]),
+    )
+    conn.commit()
+
+
+def load_quota(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute(
+        "SELECT remaining, unit_limit, reset_at, observed_at FROM schedules_quota"
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("remaining", "limit", "reset_at", "observed_at"), row))
+
+
+def known_units(stored: dict | None, now: datetime | None = None) -> int | None:
+    """Units believed available before any call this run, or None if unknown.
+
+    Unknown means there is nothing to plan from — no row yet, or one older than
+    QUOTA_MAX_AGE_DAYS — and the first response will supply the figure. A row
+    whose reset time has passed describes a period that is over, so the full
+    limit is available again.
+    """
+    if stored is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    observed = datetime.fromisoformat(stored["observed_at"])
+    if now - observed > timedelta(days=QUOTA_MAX_AGE_DAYS):
+        return None
+    if datetime.fromisoformat(stored["reset_at"]) <= now:
+        return stored["limit"]
+    return stored["remaining"]
+
+
+def quota_allows_run(
+    stored: dict | None, reserve: int, now: datetime | None = None
+) -> bool:
+    """The pre-run gate: start unless the provider is known to be at the reserve."""
+    units = known_units(stored, now)
+    return units is None or units > reserve
 
 
 def units_used_this_month(conn: sqlite3.Connection) -> int:
