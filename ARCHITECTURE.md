@@ -514,6 +514,9 @@ well-covered large airports kept the stuck set too small to notice.
 **AeroDataBox mechanics** (verified live 2026-09-05 against ZSPD):
 
 - Endpoint `GET /flights/airports/icao/{icao}?offsetMinutes&durationMinutes`, Tier 1 = **1 API unit**
+  (**corrected 2026-10-03:** measured at **2 units per call**, and the quota period is the
+  subscription anniversary, not the calendar month — Section 4.1.8. The budget table below predates
+  this and is stale)
 - RapidAPI **Basic: $0/month, 600 units, recurring** (not a trial), 1 req/s
 - **Hard 12-hour cap per request** — `durationMinutes=1440` returns
   `HTTP 400 "must not be more than 12 hours in duration"`
@@ -907,6 +910,78 @@ buffer or a minimum dwell time, not a return to a frozen list.
 **Section 12.5.5** ("Route deduplication — Resolved 2026-09-05") stays valid: Decision 5 keeps the
 partition static in practice, so the disjointness the dedup fix relies on is undisturbed. If a region is
 ever moved at a checkpoint, that bullet reopens and needs the source-priority rule it sketches.
+
+#### 4.1.8 Schedules Unit Accounting — Trust the Provider
+
+**Decision date:** 2026-10-03. Amends Section 4.1.5 (AeroDataBox mechanics and the unit budget).
+
+**Problem.** The schedules fetcher has collected nothing since its 2026-09-20 run. Every run after it stopped
+on a 429 at its first call and reported `run OK: monthly unit quota exhausted`, while its own counter
+showed 281 of 600 units left, and the stall continued after that counter reset on Oct 1.
+
+**What measurement found** (one probe call, 2026-10-03, response headers on the 429):
+
+| header | value | meaning |
+|---|---|---|
+| `X-RateLimit-API-Units-Limit` | 600 | the plan's unit cap, as documented |
+| `X-RateLimit-API-Units-Remaining` | -1 | genuinely exhausted |
+| `X-RateLimit-Requests-Remaining` | 2098 of 2400 | 302 requests this period |
+| `X-RateLimit-API-Units-Reset` | 192659 s | resets ≈ 2026-10-05 13:35 UTC |
+
+`schedules_fetch_log` holds 298 attempts for the same period, so the fetcher's count of *requests* was
+accurate. Two assumptions in Section 4.1.5 were wrong:
+
+- **The endpoint costs 2 units per call, not 1** — 600 units went on ~300 requests.
+- **The quota period is the subscription anniversary, not the calendar month** — first call
+  2026-09-05 13:58 UTC, reset on the 5th.
+
+A per-second throttle 429 carries no unit headers at all (observed on the second probe call).
+
+**Decision 1 — the provider's headers are the only source of unit accounting.** The fetcher reads
+`X-RateLimit-API-Units-Remaining`, `-Limit` and `-Reset` from each response. It holds no unit cost, no
+period length and no cap of its own, since those are the facts that turned out to be wrong.
+`units_used_this_month`, `ADB_MONTHLY_UNITS` and their tests are removed. `Remaining` is clamped at 0.
+
+| alternative | why not |
+|---|---|
+| Keep the local counter, corrected to 2 units and a 5th-to-5th period | Replaces two wrong constants with two that are right today; a plan or pricing change breaks it silently again |
+| Keep the local counter as a cross-check against the header | Would have caught the 2-unit cost in week one, but it is a second number to maintain. Rejected by user 2026-10-03; the alarm question below is the remaining guard |
+
+**Decision 2 — the pre-run budget is the last value seen, corrected by the first response.** The last
+`(remaining, limit, reset_at, observed_at)` is persisted as a single row in the SQLite cache, with
+`reset_at` stored as an absolute time. Before any call:
+
+- stored row, `reset_at` in the future → the run is allowed if `remaining > ADB_UNIT_RESERVE`;
+- stored row, `reset_at` in the past → the period has rolled over; treat as a full `limit`;
+- no stored row (first run after this change) → allowed; the first response supplies the value;
+- stored row with `observed_at` more than 7 days old → **expired**, treated as no stored row. Under
+  Decision 3 a run that meets only headerless responses never refreshes the row, so without an age
+  limit a string of such runs would keep starting from the same figure indefinitely. An expired row
+  costs at most one call to re-learn the state (decided 2026-10-03).
+
+Every response that carries the headers overwrites the row, including the monthly-quota 429. The run
+stops as soon as a response shows `remaining <= ADB_UNIT_RESERVE`. Because no unit cost is held, units
+are never converted into a call count: a run plans its normal `ADB_DAILY_CALLS` queue and the headers
+cut it short. The cost is one period-end run whose tier split (Section 4.1.7) is planned for more calls
+than it gets to make.
+
+**Decision 3 — a response without unit headers changes nothing.** Timeouts, connection resets and
+throttle 429s leave the stored value as it is; the next response that carries headers, success or
+quota 429, corrects it. No assumed cost is deducted. The figure can run optimistic through a burst of
+failures that did cost units, bounded by `ADB_DAILY_CALLS` per run.
+
+**Reporting.** The run line reports the provider's remaining units and the reset date, and a quota
+stop reads `resumes <reset date>` rather than `resumes next month`.
+
+**Left open, each a separate decision.**
+
+- *Pacing.* The real budget is ~300 calls per period. At 19 calls/day the quota is spent in ~16 days
+  and the fetcher is idle for the rest of the period. The budget table, the ~23-day cycle and the
+  maturity dates in Sections 4.1.5 and 4.1.7 are computed from 600 calls and are **stale until this is
+  decided**; one sweep of 443 airports costs 886 units.
+- *Paid tier.* Pro (6,000 units) is 3,000 calls, not 6,000.
+- *Alarm.* Whether a quota stop that arrives well before the period ends should alarm instead of
+  reporting `run OK`.
 
 ### 4.2 Aircraft Code Normalization
 
