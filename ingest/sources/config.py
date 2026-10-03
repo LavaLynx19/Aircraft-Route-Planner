@@ -122,11 +122,13 @@ def aerodatabox_config() -> dict:
         raise SystemExit("AERODATABOX_API_KEY missing (set it in .env)")
     return {
         "api_key": key,
-        # RapidAPI Basic tier: 600 units/month, recurring, 1 unit per airport call.
-        # 19 calls/day ≈ 578/month, giving a ~23-day sweep of the 439 blackout airports.
-        "monthly_units": int(os.environ.get("ADB_MONTHLY_UNITS", "600")),
+        # The unit cap, cost and period are the provider's, read from response
+        # headers — none is configured here (ARCHITECTURE.md §4.1.8). 19 calls/day
+        # was sized for 1 unit per call; at the measured 2 it spends a 600-unit
+        # period in ~16 days. Pacing is an open decision in §4.1.8.
         "daily_calls": int(os.environ.get("ADB_DAILY_CALLS", "19")),
-        # Held back so a long month cannot leave zero units for a manual probe.
+        # Units, not calls. The run stops once the provider reports this many or
+        # fewer left, so a period cannot end with nothing for a manual probe.
         "unit_reserve": int(os.environ.get("ADB_UNIT_RESERVE", "20")),
         # Queue priority within the blackout set (ARCHITECTURE.md §4.1.7): the most
         # productive ~150 airports are revisited at 2x the rest's per-airport rate.

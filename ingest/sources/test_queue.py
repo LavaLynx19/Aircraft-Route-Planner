@@ -176,20 +176,6 @@ class TestWindowAlreadyResolved:
         assert fetch_schedules.due_airports(conn, 1) == [("ZBAA", 0)]
 
 
-class TestUnitAccounting:
-    def test_retries_are_counted_as_units_not_rows(self, conn):
-        """A throttle retry is a second real API call against the 600-unit cap."""
-        add_schedule_attempt(conn, "ZSPD", status="ok", days_ago=0, attempts=2)
-        add_schedule_attempt(conn, "ZBAA", status="ok", days_ago=0, attempts=1)
-
-        rows = conn.execute("SELECT count(*) FROM schedules_fetch_log").fetchone()[0]
-        assert rows == 2
-        assert fetch_schedules.units_used_this_month(conn) == 3
-
-    def test_empty_log_reports_zero_not_none(self, conn):
-        assert fetch_schedules.units_used_this_month(conn) == 0
-
-
 def test_window_halves_tile_the_last_24h():
     """The two halves must abut exactly — no gap, no overlap."""
     off0, _ = fetch_schedules.window_for(0)

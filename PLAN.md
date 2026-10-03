@@ -1028,13 +1028,21 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
       `fetch_schedules.py`; `QUOTA_MAX_AGE_DAYS = 7`. Nothing calls them yet — `run()` is wired in T3.
       The gate-branch and overwrite tests listed under T4 were written here: 9 tests, 148 pass on CLT
       3.9, ruff clean
-- [ ] **T3 — drive the run from the headers (Decisions 1–3).** In `run()`: plan the normal
+- [x] **T3 — drive the run from the headers (Decisions 1–3).** In `run()`: plan the normal
       `ADB_DAILY_CALLS` queue with no units-to-calls conversion; overwrite the stored row after every
       response that carries headers, including the quota 429; stop once `remaining <= ADB_UNIT_RESERVE`;
       leave the row untouched on a headerless response. Remove `units_used_this_month`,
       `ADB_MONTHLY_UNITS` and the `units_spent`/`monthly_remaining` arithmetic. The run line reports the
       provider's remaining units and reset date; a quota stop reads `resumes <reset date>`. `classify`
-      keeps its QUIET/OK outcomes — whether an early quota stop should alarm is open in §4.1.8
+      keeps its QUIET/OK outcomes — whether an early quota stop should alarm is open in §4.1.8.
+      **Done 2026-10-03:** `run()` gates on `quota_allows_run`, saves every quota a response carries,
+      and stops on the quota 429 or once a response reports `remaining <= ADB_UNIT_RESERVE`. Stats carry
+      `units_remaining` and `reset_at` in place of `monthly_remaining`/`units_spent`; `attempts` is
+      still logged per visit. `units_used_this_month`, `ADB_MONTHLY_UNITS` and `TestUnitAccounting` are
+      gone, and the `test_runner.py` classify fixture is brought forward with 2 new cases. Smoke-tested
+      against stubbed responses (first-call 429 with no row, stop at the reserve, blocked by a stored
+      row, headerless errors, exhausted row past its reset); those become committed tests in T4. 148
+      pass on CLT 3.9, ruff clean. Not yet run live
 - [ ] **T4 — tests.** Replace the `units_used_this_month` cases in `test_queue.py` and the
       `monthly_remaining` fixtures in `test_runner.py`. New cases: header parsing incl. `-1` and absent
       headers; each of the four gate branches; row overwritten by a quota 429; row unchanged by a
