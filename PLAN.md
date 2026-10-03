@@ -1043,10 +1043,17 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
       against stubbed responses (first-call 429 with no row, stop at the reserve, blocked by a stored
       row, headerless errors, exhausted row past its reset); those become committed tests in T4. 148
       pass on CLT 3.9, ruff clean. Not yet run live
-- [ ] **T4 — tests.** Replace the `units_used_this_month` cases in `test_queue.py` and the
+- [x] **T4 — tests.** Replace the `units_used_this_month` cases in `test_queue.py` and the
       `monthly_remaining` fixtures in `test_runner.py`. New cases: header parsing incl. `-1` and absent
       headers; each of the four gate branches; row overwritten by a quota 429; row unchanged by a
-      headerless response; run stops at the reserve
+      headerless response; run stops at the reserve. **Done 2026-10-03**, across three commits: header
+      parsing with T1 (7 tests, `test_fetch.py`), the gate branches with T2 (9, `test_queue.py`), the
+      fixture and counter removal with T3. This task adds `TestRunFollowsTheProvidersQuota` in
+      `test_queue.py`: 8 tests driving `run()` against stubbed responses — first-call quota 429 with
+      nothing stored, the stop at the reserve, no calls from a stored row at the reserve, headerless
+      responses, an exhausted row past its reset, a passed reset not reported as the next one, an
+      expired row, and a throttle retry whose second reply carries the headers. 156 pass on CLT 3.9,
+      ruff clean
 - [ ] **T5 — RUNBOOK §4** replaces the "sum `attempts`" accounting note and the "monthly" wording with
       the header-based figure and the anniversary reset, and says how to read the stored row
 - [ ] Verify: pytest and ruff clean; then the first unattended run after the reset (~2026-10-06
