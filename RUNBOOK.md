@@ -60,18 +60,38 @@ curl -s localhost:8081/health        # opensky
 | Job | What | When | Logs |
 |---|---|---|---|
 | launchd agent `com.aircraft-route-planner.fetch` | `fetch_flights.py` — fetches ~125 airports' flight data from OpenSky into SQLite (~3,750 of 4,000 daily credits) | daily 09:00 (runs on next wake if the Mac was asleep) | `ingest/data/fetch.log` |
-| launchd agent `com.aircraft-route-planner.schedules` | `fetch_schedules.py` — AeroDataBox schedules for the 443 ADS-B-blackout airports (China/Russia/CIS), ~19 of 600 free monthly units | daily 10:00 | `ingest/data/schedules.log` |
-| launchd agent `com.aircraft-route-planner.refresh` | `refresh.py` — rebuilds the staging graph from the SQLite cache, reconciles stale edges, then restarts whichever API servers are already running so the rebuild reaches clients. Skips quietly if a fetcher is still writing (ARCHITECTURE.md §4.1.5 *Refresh chain*) | daily 11:00 | `ingest/data/refresh.log`, servers to `ingest/data/api-<profile>.log` |
+| launchd agent `com.aircraft-route-planner.schedules` | `fetch_schedules.py` — AeroDataBox schedules for the 443 ADS-B-blackout airports (China/Russia/CIS), ~19 calls a day against the free tier's 600 units per period (2 units a call) | daily 10:00 | `ingest/data/schedules.log` |
+| launchd agent `com.aircraft-route-planner.refresh` | `refresh.py` — rebuilds the staging graph from the SQLite cache, reconciles stale edges, then restarts whichever API servers are already running so the rebuild reaches clients. Starts the staging Neo4j container for the load and stops it afterwards unless the OpenSky API is listening. Skips quietly if a fetcher is still writing (ARCHITECTURE.md §4.1.5 *Refresh chain*) | daily 11:00 | `ingest/data/refresh.log`, servers to `ingest/data/api-<profile>.log` |
 
-Sum `attempts`, not rows: a throttle retry is a second real API call against the 600-unit cap but
-produces only one log row, so `count(*)` reports less than was actually spent (corrected
-2026-09-12).
+**Unit accounting is the provider's, not ours** (ARCHITECTURE.md §4.1.8, since 2026-10-03). The
+fetcher reads `X-RateLimit-API-Units-Remaining`/`-Limit`/`-Reset` from each response and keeps the
+last value in the one-row `schedules_quota` table. It holds no unit cost, cap or period of its own.
+The ones it held until then were both wrong, which is why it sat idle from 2026-09-21 with its own
+counter showing 281 units left:
 
-The schedules job reports `--- run OK: N units left this month ---`. Near the monthly ceiling it
-reports `run OK: monthly unit quota exhausted` and exits 0 — that is the **expected** end state
-each month, not a fault, so it deliberately does not alarm. An `UNPRODUCTIVE` exit from it means
-it had budget and still collected nothing, which is a real problem; its detail line separates empty
-windows from errors, since they point at different causes.
+- a call costs **2 units, not 1** — the 600 units are ~300 calls;
+- the period is the **subscription anniversary (the 5th, ~13:35 UTC), not the calendar month**.
+
+Do not estimate spend from `schedules_fetch_log`: `SUM(attempts)` counts calls, not units.
+
+The schedules job reports `--- run OK: N units left, resets <date> ---`. Once the provider reports
+`ADB_UNIT_RESERVE` (20) units or fewer it stops, and until the reset every run reports
+`run OK: unit quota exhausted — resumes <date>` and exits 0 — that is the **expected** end state
+each period, not a fault, so it deliberately does not alarm. Those runs make no call, except one
+every 7 days when the stored row expires and is re-learnt from a single 429. At 19 calls a
+day that state is reached about 16 days into the period (pacing is an open decision in §4.1.8). An
+`UNPRODUCTIVE` exit means it had budget and still collected nothing, which is a real problem; its
+detail line separates empty windows from errors, since they point at different causes.
+
+Reading the start line and the stored row:
+
+- `units unknown` — nothing usable is stored (first run, or the row is more than 7 days old). The
+  run proceeds and the first response sets the figure.
+- A row whose `reset_at` has passed counts as a full limit again.
+- A timeout, connection reset or per-second throttle carries no unit headers and leaves the row
+  as it was, so `observed_at` is the time of the last response that did.
+- A quota stop logs the provider's own message: `  <ICAO>: HTTP 429: {"message":"You have exceeded
+  the MONTHLY quota for API Units ..."}`.
 
 A window with no departures is `empty`, not an error: the API answers **HTTP 204** with no body.
 Before 2026-09-17 those were logged as `  <ICAO>: JSONDecodeError: Expecting value: line 1 column 1
@@ -81,9 +101,8 @@ line with no status is a network failure.
 
 ```bash
 tail -20 ingest/data/schedules.log                       # last schedules run
-sqlite3 ingest/data/opensky_cache.db \
-  "SELECT COALESCE(SUM(attempts),0) FROM schedules_fetch_log
-   WHERE substr(fetched_at,1,7)=strftime('%Y-%m','now');"
+sqlite3 -readonly ingest/data/opensky_cache.db \
+  "SELECT remaining, unit_limit, reset_at, observed_at FROM schedules_quota;"
 ```
 
 **The restart step was broken until 2026-09-19** and is worth knowing about, because both causes recur.
@@ -96,7 +115,15 @@ everything (103s, against what was then a 90s budget) and the chain called it fa
 `refresh.STARTUP_BUDGET_SECONDS` is 180 for that reason; expect one slow restart after a Go upgrade.
 A failed restart alarms and names the profile and port, so it is loud rather than silent.
 
-Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), Docker containers, and the
+**Neo4j runs only when needed (since 2026-10-31).** The refresh starts `aircraft-route-neo4j-staging`
+for the load and stops it after every run unless the OpenSky API is listening on :8081. That includes
+a container you started by hand, so close any Neo4j browser or cypher-shell work before 11:00, or keep
+the API up. For ad-hoc use, start containers as in §1–§2; production is never started or stopped by a
+job. Docker Desktop must be open: the job does not launch it, and an unreachable daemon alarms. After a
+staging wipe the job alarms until you recreate the container with
+`docker compose -f docker-compose.staging.yml up -d`.
+
+Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), the production container, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and
 restarts any server already running** (§4.1.5 *Refresh chain*), so a server you leave up picks up
 each day's reconciliation on its own; one you stop stays stopped.
@@ -165,7 +192,7 @@ docker exec -i aircraft-route-neo4j-staging cypher-shell \
 ```
 
 A large marked-stale count is normal after a fetch gap: those edges failed the validity filter
-and were previously being served only because the loader had no authority to retract them. The API servers keep running until stopped or reboot; the Docker containers restart per Docker Desktop's own policy.
+and were previously being served only because the loader had no authority to retract them. The API servers keep running until stopped or reboot. Neither container has a restart policy, so neither comes back on its own after a reboot; the refresh starts staging when it needs it.
 
 ```bash
 launchctl list | grep aircraft-route-planner                                    # is it loaded? (2nd column = last exit status)
@@ -266,7 +293,7 @@ scheduled run inside that shadow and can make it come back `UNPRODUCTIVE`; this 
 
 It recurred on 2026-09-15: a kickstart at 23:11 local, meant to recover a day lost to a moved project
 directory (see above), left the next morning's run just 2 airports before the credit floor. A missed
-OpenSky day cannot be bought back, only moved. AeroDataBox is different — its quota is monthly, so a
+OpenSky day cannot be bought back, only moved. AeroDataBox is different — its quota is per period (reset on the 5th), so a
 recovery run there does restore the missed day.
 
 ### Staleness check — has the cache stopped growing?

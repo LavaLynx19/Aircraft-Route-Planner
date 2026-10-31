@@ -176,20 +176,6 @@ class TestWindowAlreadyResolved:
         assert fetch_schedules.due_airports(conn, 1) == [("ZBAA", 0)]
 
 
-class TestUnitAccounting:
-    def test_retries_are_counted_as_units_not_rows(self, conn):
-        """A throttle retry is a second real API call against the 600-unit cap."""
-        add_schedule_attempt(conn, "ZSPD", status="ok", days_ago=0, attempts=2)
-        add_schedule_attempt(conn, "ZBAA", status="ok", days_ago=0, attempts=1)
-
-        rows = conn.execute("SELECT count(*) FROM schedules_fetch_log").fetchone()[0]
-        assert rows == 2
-        assert fetch_schedules.units_used_this_month(conn) == 3
-
-    def test_empty_log_reports_zero_not_none(self, conn):
-        assert fetch_schedules.units_used_this_month(conn) == 0
-
-
 def test_window_halves_tile_the_last_24h():
     """The two halves must abut exactly — no gap, no overlap."""
     off0, _ = fetch_schedules.window_for(0)
@@ -355,3 +341,203 @@ class TestSchedulesTiering:
             add_schedule_airport(conn, icao)
         due = fetch_schedules.due_airports(conn, 5, only={"ZBBB"})
         assert [icao for icao, _ in due] == ["ZBBB"]
+
+
+class TestStoredQuota:
+    """The pre-run budget is the last value the provider reported (§4.1.8)."""
+
+    NOW = datetime(2026, 10, 10, 4, 30, 0, tzinfo=timezone.utc)
+
+    def _quota(self, remaining, *, reset_in_days=20.0, observed_days_ago=1.0):
+        return {
+            "remaining": remaining,
+            "limit": 600,
+            "reset_at": (self.NOW + timedelta(days=reset_in_days)).isoformat(),
+            "observed_at": (self.NOW - timedelta(days=observed_days_ago)).isoformat(),
+        }
+
+    def test_nothing_is_stored_before_the_first_response(self, conn):
+        assert fetch_schedules.load_quota(conn) is None
+
+    def test_a_saved_quota_round_trips(self, conn):
+        quota = self._quota(412)
+        fetch_schedules.save_quota(conn, quota)
+        assert fetch_schedules.load_quota(conn) == quota
+
+    def test_a_later_response_overwrites_the_row(self, conn):
+        fetch_schedules.save_quota(conn, self._quota(412))
+        fetch_schedules.save_quota(conn, self._quota(410))
+        rows = conn.execute("SELECT remaining FROM schedules_quota").fetchall()
+        assert rows == [(410,)]
+
+    def test_no_row_is_unknown_and_the_run_may_start(self):
+        assert fetch_schedules.known_units(None, self.NOW) is None
+        assert fetch_schedules.quota_allows_run(None, 20, self.NOW)
+
+    def test_a_current_row_above_the_reserve_allows_the_run(self):
+        stored = self._quota(412)
+        assert fetch_schedules.known_units(stored, self.NOW) == 412
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_current_row_at_the_reserve_blocks_the_run(self):
+        assert not fetch_schedules.quota_allows_run(self._quota(20), 20, self.NOW)
+        assert not fetch_schedules.quota_allows_run(self._quota(0), 20, self.NOW)
+
+    def test_a_passed_reset_means_the_full_limit_again(self):
+        """The 2026-10-01 case: an exhausted row must not outlive its period."""
+        stored = self._quota(0, reset_in_days=-0.5)
+        assert fetch_schedules.known_units(stored, self.NOW) == 600
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_row_older_than_the_age_limit_is_unknown(self):
+        """Headerless responses never refresh the row, so it must expire."""
+        age = fetch_schedules.QUOTA_MAX_AGE_DAYS + 0.1
+        stored = self._quota(0, observed_days_ago=age)
+        assert fetch_schedules.known_units(stored, self.NOW) is None
+        assert fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+    def test_a_row_just_inside_the_age_limit_still_counts(self):
+        age = fetch_schedules.QUOTA_MAX_AGE_DAYS - 0.1
+        stored = self._quota(0, observed_days_ago=age)
+        assert not fetch_schedules.quota_allows_run(stored, 20, self.NOW)
+
+
+class _KeptOpen:
+    """The test's connection, minus `close`: `run()` closes what it opens."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        pass
+
+
+class TestRunFollowsTheProvidersQuota:
+    """`run()` end to end against stubbed responses (ARCHITECTURE.md §4.1.8).
+
+    Five airports and a five-call day, so a run that is not cut short visits all
+    of them. Nothing leaves the machine: `fetch_departures` is replaced.
+    """
+
+    RESERVE = 20
+
+    @pytest.fixture
+    def start(self, conn, monkeypatch):
+        for rank in range(5):
+            add_schedule_airport(conn, f"ZZ0{rank}", rank=rank)
+        cfg = {
+            "api_key": "test-key",
+            "daily_calls": 5,
+            "unit_reserve": self.RESERVE,
+            "priority_tier_size": 2,
+            "priority_rate_multiplier": 2,
+        }
+        monkeypatch.setattr(fetch_schedules, "aerodatabox_config", lambda: cfg)
+        monkeypatch.setattr(sqlite3, "connect", lambda path: _KeptOpen(conn))
+        monkeypatch.setattr(fetch_schedules, "refresh_airports", lambda c: 5)
+        monkeypatch.setattr(fetch_schedules.time, "sleep", lambda seconds: None)
+
+        def start(responses) -> tuple:
+            """Run against these responses; return (stats, airports called)."""
+            called = []
+            replies = iter(responses)
+
+            def fake_fetch(api_key, icao, offset_minutes):
+                called.append(icao)
+                return next(replies)
+
+            monkeypatch.setattr(fetch_schedules, "fetch_departures", fake_fetch)
+            return fetch_schedules.run(), called
+
+        return start
+
+    @staticmethod
+    def _quota(remaining, *, reset_in_days=20.0, observed_days_ago=0.0):
+        now = datetime.now(timezone.utc)
+        return {
+            "remaining": remaining,
+            "limit": 600,
+            "reset_at": (now + timedelta(days=reset_in_days)).isoformat(),
+            "observed_at": (now - timedelta(days=observed_days_ago)).isoformat(),
+        }
+
+    def test_with_nothing_stored_the_first_response_sets_the_quota(self, conn, start):
+        """The 2026-09-21 stall, as it now reads: one call, and the row is learnt."""
+        exhausted = self._quota(0)
+        stats, called = start([("quota_exceeded", [], exhausted)])
+
+        assert called == ["ZZ00"]
+        assert stats["quota_exhausted"]
+        assert fetch_schedules.load_quota(conn) == exhausted
+        outcome, detail = fetch_schedules.classify(stats)
+        assert outcome == "QUIET"
+        assert "resumes" in detail and "unknown" not in detail
+
+    def test_the_run_stops_once_the_reserve_is_reached(self, conn, start):
+        fetch_schedules.save_quota(conn, self._quota(26))
+        replies = [("empty", [], self._quota(left)) for left in (24, 22, 20, 18, 16)]
+        stats, called = start(replies)
+
+        assert called == ["ZZ00", "ZZ01", "ZZ02"]
+        assert stats["quota_exhausted"]
+        assert stats["units_remaining"] == self.RESERVE
+        assert fetch_schedules.load_quota(conn)["remaining"] == self.RESERVE
+        # The visit that reached the reserve was a real one and is logged.
+        logged = conn.execute("SELECT count(*) FROM schedules_fetch_log").fetchone()[0]
+        assert logged == 3
+
+    def test_a_stored_row_at_the_reserve_makes_no_calls(self, conn, start):
+        fetch_schedules.save_quota(conn, self._quota(4))
+        stats, called = start([])
+
+        assert called == []
+        assert stats["queued"] == 0 and stats["quota_exhausted"]
+        assert fetch_schedules.classify(stats)[0] == "QUIET"
+
+    def test_headerless_responses_leave_the_stored_row_alone(self, conn, start):
+        """Timeouts and resets say nothing about the quota: no assumed deduction."""
+        before = self._quota(300, observed_days_ago=1)
+        fetch_schedules.save_quota(conn, before)
+        stats, called = start([("error", [], None)] * 5)
+
+        assert len(called) == 5
+        assert fetch_schedules.load_quota(conn) == before
+        assert stats["units_remaining"] == 300
+        assert not stats["quota_exhausted"]
+
+    def test_an_exhausted_row_past_its_reset_does_not_block_the_run(self, conn, start):
+        """The 2026-10-01 case from the provider's side: a new period has begun."""
+        fetch_schedules.save_quota(conn, self._quota(0, reset_in_days=-0.5))
+        replies = [("ok", [], self._quota(left)) for left in (598, 596, 594, 592, 590)]
+        stats, called = start(replies)
+
+        assert len(called) == 5
+        assert stats["units_remaining"] == 590
+        assert fetch_schedules.load_quota(conn)["remaining"] == 590
+
+    def test_a_passed_reset_is_not_reported_as_the_next_one(self, conn, start):
+        fetch_schedules.save_quota(conn, self._quota(0, reset_in_days=-0.5))
+        stats, _ = start([("error", [], None)] * 5)
+
+        assert stats["reset_at"] is None
+
+    def test_an_expired_row_does_not_block_the_run(self, conn, start):
+        age = fetch_schedules.QUOTA_MAX_AGE_DAYS + 1
+        fetch_schedules.save_quota(conn, self._quota(0, observed_days_ago=age))
+        stats, called = start([("empty", [], self._quota(410))] * 5)
+
+        assert len(called) == 5
+        assert stats["units_remaining"] == 410
+
+    def test_a_throttle_retry_that_carries_headers_is_recorded(self, conn, start):
+        """The first reply is the header-less throttle 429; the retry succeeds."""
+        replies = [("throttled", [], None), ("empty", [], self._quota(self.RESERVE))]
+        _, called = start(replies)
+
+        assert called == ["ZZ00", "ZZ00"]
+        assert fetch_schedules.load_quota(conn)["remaining"] == self.RESERVE
+        attempts = conn.execute("SELECT attempts FROM schedules_fetch_log").fetchall()
+        assert attempts == [(2,)]

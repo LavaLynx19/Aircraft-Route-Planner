@@ -47,7 +47,7 @@ class TestRunGuard:
         """The 2026-09-10 hole: this used to exit with an unhandled traceback."""
 
         def bad_classify(stats):
-            raise KeyError("monthly_remaining")
+            raise KeyError("units_remaining")
 
         with pytest.raises(SystemExit) as exc:
             runner.run_guard("T", _ok(), bad_classify)
@@ -111,7 +111,8 @@ class TestSchedulesClassify:
             "empty": 0,
             "error": 0,
             "quota_exhausted": False,
-            "monthly_remaining": 400,
+            "units_remaining": 400,
+            "reset_at": "2026-11-05T13:35:00+00:00",
         }
         base.update(kw)
         return base
@@ -121,14 +122,26 @@ class TestSchedulesClassify:
         assert outcome == "OK"
 
     def test_quota_exhaustion_is_quiet_not_a_fault(self):
-        """Near the 600-unit ceiling every remaining run legitimately does nothing.
+        """Once the quota is spent every remaining run legitimately does nothing.
 
-        Alarming here would fire a false positive every month by design.
+        Alarming here would fire a false positive every period by design.
         """
-        outcome, _ = fetch_schedules.classify(
+        outcome, detail = fetch_schedules.classify(
             self._stats(queued=0, quota_exhausted=True)
         )
         assert outcome == "QUIET"
+        assert detail == "unit quota exhausted — resumes 2026-11-05 13:35 UTC"
+
+    def test_a_healthy_run_reports_the_providers_figure_and_reset(self):
+        _, detail = fetch_schedules.classify(self._stats(ok=14))
+        assert detail == "400 units left, resets 2026-11-05 13:35 UTC"
+
+    def test_an_unknown_quota_is_reported_as_unknown(self):
+        """No response carried the unit headers and nothing usable was stored."""
+        _, detail = fetch_schedules.classify(
+            self._stats(ok=14, units_remaining=None, reset_at=None)
+        )
+        assert detail == "units left unknown, resets at an unknown time"
 
     def test_budget_available_but_nothing_collected_alarms(self):
         outcome, detail = fetch_schedules.classify(self._stats(ok=0, error=19))

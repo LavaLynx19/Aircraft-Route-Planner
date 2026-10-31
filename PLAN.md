@@ -1003,6 +1003,87 @@ unmerged `fix/review-findings-2026-09-19` branch. Decision 3 (keep the 60-day gr
 
 ---
 
+#### 6.23 Schedules Unit Accounting From Provider Headers (ARCHITECTURE.md §4.1.8, 2026-10-03)
+
+Implements the decision record written after the 2026-09-21 → 10-05 schedules stall: the endpoint
+costs 2 units per call and the quota period is the subscription anniversary, so the local counter was
+wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay open in §4.1.8.
+
+- [x] **T1 — read the unit headers (Decision 1).** `fetch_departures` returns the quota state parsed
+      from `X-RateLimit-API-Units-Remaining`/`-Limit`/`-Reset` alongside its status, on success and on
+      `HTTPError` alike, or nothing when the headers are absent (timeouts, resets, throttle 429s).
+      `Remaining` is clamped at 0 and `Reset` (seconds) is converted to an absolute UTC time at read.
+      The quota 429 prints its response body, which the log has never carried. **Done 2026-10-03:**
+      `parse_quota` in `fetch_schedules.py`; `fetch_departures` now returns `(status, departures,
+      quota)`, the shape `fetch_flights.fetch_departures` already has. `run()` unpacks and ignores the
+      quota until T3, so behaviour is unchanged apart from the 429 body line. 7 tests, 139 pass, ruff
+      clean
+- [x] **T2 — persist the last value seen (Decision 2).** A single-row table in the SQLite cache holding
+      `(remaining, limit, reset_at, observed_at)`, created in `init_db`. A pre-run gate returns whether
+      the run may start: future `reset_at` → only if `remaining > ADB_UNIT_RESERVE`; past `reset_at` →
+      full `limit`; no row → allowed; `observed_at` older than 7 days → expired, treated as no row. The
+      7 days is a named constant, not a buried literal. **Done 2026-10-03:** table `schedules_quota`
+      (one row, enforced by `CHECK (id = 1)`; the column is `unit_limit` because `limit` is an SQL
+      keyword); `save_quota`, `load_quota`, `known_units` and the gate `quota_allows_run` in
+      `fetch_schedules.py`; `QUOTA_MAX_AGE_DAYS = 7`. Nothing calls them yet — `run()` is wired in T3.
+      The gate-branch and overwrite tests listed under T4 were written here: 9 tests, 148 pass on CLT
+      3.9, ruff clean
+- [x] **T3 — drive the run from the headers (Decisions 1–3).** In `run()`: plan the normal
+      `ADB_DAILY_CALLS` queue with no units-to-calls conversion; overwrite the stored row after every
+      response that carries headers, including the quota 429; stop once `remaining <= ADB_UNIT_RESERVE`;
+      leave the row untouched on a headerless response. Remove `units_used_this_month`,
+      `ADB_MONTHLY_UNITS` and the `units_spent`/`monthly_remaining` arithmetic. The run line reports the
+      provider's remaining units and reset date; a quota stop reads `resumes <reset date>`. `classify`
+      keeps its QUIET/OK outcomes — whether an early quota stop should alarm is open in §4.1.8.
+      **Done 2026-10-03:** `run()` gates on `quota_allows_run`, saves every quota a response carries,
+      and stops on the quota 429 or once a response reports `remaining <= ADB_UNIT_RESERVE`. Stats carry
+      `units_remaining` and `reset_at` in place of `monthly_remaining`/`units_spent`; `attempts` is
+      still logged per visit. `units_used_this_month`, `ADB_MONTHLY_UNITS` and `TestUnitAccounting` are
+      gone, and the `test_runner.py` classify fixture is brought forward with 2 new cases. Smoke-tested
+      against stubbed responses (first-call 429 with no row, stop at the reserve, blocked by a stored
+      row, headerless errors, exhausted row past its reset); those become committed tests in T4. 148
+      pass on CLT 3.9, ruff clean. Not yet run live
+- [x] **T4 — tests.** Replace the `units_used_this_month` cases in `test_queue.py` and the
+      `monthly_remaining` fixtures in `test_runner.py`. New cases: header parsing incl. `-1` and absent
+      headers; each of the four gate branches; row overwritten by a quota 429; row unchanged by a
+      headerless response; run stops at the reserve. **Done 2026-10-03**, across three commits: header
+      parsing with T1 (7 tests, `test_fetch.py`), the gate branches with T2 (9, `test_queue.py`), the
+      fixture and counter removal with T3. This task adds `TestRunFollowsTheProvidersQuota` in
+      `test_queue.py`: 8 tests driving `run()` against stubbed responses — first-call quota 429 with
+      nothing stored, the stop at the reserve, no calls from a stored row at the reserve, headerless
+      responses, an exhausted row past its reset, a passed reset not reported as the next one, an
+      expired row, and a throttle retry whose second reply carries the headers. 156 pass on CLT 3.9,
+      ruff clean
+- [x] **T5 — RUNBOOK §4** replaces the "sum `attempts`" accounting note and the "monthly" wording with
+      the header-based figure and the anniversary reset, and says how to read the stored row. **Done
+      2026-10-03:** the accounting note, the run-line wording, the `schedules_quota` query in place of
+      the `SUM(attempts)` one, the agent table row and the kickstart note
+- [ ] Verify: pytest and ruff clean; then the first unattended run after the reset (~2026-10-06
+      04:30 UTC) reports a provider figure that drops by 2 per call, and the stored row matches the
+      last response
+- [>] **Pacing, paid tier and the early-stop alarm (§4.1.8 "Left open").** ~300 calls per period at 19
+      calls/day leaves the fetcher idle for about half of each period; the budget table, sweep cycle and
+      maturity dates in §4.1.5/§4.1.7 and the tiering figures in 6.22 T1 are stale until pacing is
+      decided → defer until: 6.23 T1–T4 are merged and one run has confirmed the header figures
+
+#### 6.24 Neo4j Held Only During the Refresh (ARCHITECTURE.md §4.1.5 *Refresh chain*, 2026-10-31)
+
+**Goal:** no container runs between refreshes, so Docker's Resource Saver can engage.
+
+- [x] `staging_container.py`: `ensure_running()` starts and waits for bolt, `stop()` with a 120s grace
+      and never raises; `docker start`/`stop`, not compose (TCC)
+- [x] `load_graph.run(before_connect=None)`: hook fires only when there is something to load
+- [x] `refresh.py`: stop staging after every run unless the OpenSky API is listening; a failed stop
+      is reported in the run detail, not alarmed
+- [x] Tests: `test_staging_container.py`
+- [x] Docs: ARCHITECTURE.md §4.1.5 and §7, RUNBOOK.md §4
+- [x] Verify under launchd: a kickstarted run with no API up ends with staging stopped; with the
+      OpenSky API up, the server restarts on a newer graph and staging stays up (both 2026-10-31)
+- [x] Verify Docker Desktop enters Resource Saver after its idle timeout (2026-10-31: VM process went
+      from ~1.27 GB to gone about 5 minutes after the last container stopped)
+
+---
+
 ## Build Order (Commit Sequence)
 
 ```mermaid

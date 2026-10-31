@@ -7,12 +7,16 @@ cover those regions (AeroDataBox reports China 95% / Russia 100% for the
 schedules layer), so the 443 airports behind that blackout are fetched here
 instead (ARCHITECTURE.md §4.1.5).
 
-Budget: RapidAPI Basic is 600 units/month, 1 unit per airport call, and the API
-caps a request at a 12-hour window. Rather than spend 2 units/airport for a full
-day, each visit takes one 12h half and alternates halves between visits — the
-graph records route existence and aircraft type, not individual flights, and one
-12h window at a hub returns hundreds of departures. That halves the sweep to
-~443 units, giving a ~23-day cycle instead of ~45.
+Budget: the API caps a request at a 12-hour window. Rather than spend two calls
+per airport for a full day, each visit takes one 12h half and alternates halves
+between visits — the graph records route existence and aircraft type, not
+individual flights, and one 12h window at a hub returns hundreds of departures.
+That halves the calls a sweep needs.
+
+Unit accounting is the provider's, read from each response's rate-limit headers
+(ARCHITECTURE.md §4.1.8). The fetcher holds no unit cost, cap or period of its
+own: the ones it used to hold were wrong (2 units per call, not 1; a
+subscription-anniversary period, not a calendar month).
 
 Resumable: schedules_fetch_log records every attempt keyed by (airport, date,
 half); re-runs skip halves already 'ok'.
@@ -40,6 +44,11 @@ WINDOW_MINUTES = 720  # API hard cap: >12h returns HTTP 400
 # Cloudflare fronts this API and rejects urllib's default "Python-urllib/3.9"
 # signature with 403 / "error code: 1010". Identify the client honestly instead.
 USER_AGENT = "aircraft-route-planner/1.0"
+# A response without unit headers leaves the stored quota untouched, so a string
+# of runs that meet only timeouts would start from the same figure indefinitely.
+# Past this age the stored row is ignored and the first response re-learns it
+# (ARCHITECTURE.md §4.1.8, Decision 2).
+QUOTA_MAX_AGE_DAYS = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_schedules (
@@ -75,6 +84,16 @@ CREATE TABLE IF NOT EXISTS schedules_airports (
     country TEXT,
     rank INTEGER NOT NULL
 );
+
+-- The provider's unit accounting as of the last response that carried it.
+-- One row: the CHECK makes a second one impossible rather than merely unused.
+CREATE TABLE IF NOT EXISTS schedules_quota (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    remaining INTEGER NOT NULL,
+    unit_limit INTEGER NOT NULL,
+    reset_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+);
 """
 
 
@@ -104,24 +123,50 @@ def refresh_airports(conn: sqlite3.Connection) -> int:
     return len(airports)
 
 
-def units_used_this_month(conn: sqlite3.Connection) -> int:
-    """Every HTTP call costs a unit, successful or not — count conservatively.
+def save_quota(conn: sqlite3.Connection, quota: dict) -> None:
+    """Overwrite the stored row with a `parse_quota` result."""
+    conn.execute(
+        "INSERT OR REPLACE INTO schedules_quota "
+        "(id, remaining, unit_limit, reset_at, observed_at) VALUES (1,?,?,?,?)",
+        (quota["remaining"], quota["limit"], quota["reset_at"], quota["observed_at"]),
+    )
+    conn.commit()
 
-    Sums `attempts` rather than counting rows: a throttle retry is a second real
-    API call against the 600-unit monthly cap but produces only one log row, so
-    counting rows drifted *below* actual spend — the direction that makes the
-    fetcher believe it has budget it does not.
 
-    Still a lower bound: calls made outside the fetcher (manual probes) never
-    reach this log, and a call that returns quota_exceeded is not logged at all.
-    """
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
+def load_quota(conn: sqlite3.Connection) -> dict | None:
     row = conn.execute(
-        "SELECT COALESCE(SUM(attempts), 0) FROM schedules_fetch_log "
-        "WHERE substr(fetched_at, 1, 7) = ?",
-        (month,),
+        "SELECT remaining, unit_limit, reset_at, observed_at FROM schedules_quota"
     ).fetchone()
-    return row[0] if row else 0
+    if row is None:
+        return None
+    return dict(zip(("remaining", "limit", "reset_at", "observed_at"), row))
+
+
+def known_units(stored: dict | None, now: datetime | None = None) -> int | None:
+    """Units believed available before any call this run, or None if unknown.
+
+    Unknown means there is nothing to plan from — no row yet, or one older than
+    QUOTA_MAX_AGE_DAYS — and the first response will supply the figure. A row
+    whose reset time has passed describes a period that is over, so the full
+    limit is available again.
+    """
+    if stored is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    observed = datetime.fromisoformat(stored["observed_at"])
+    if now - observed > timedelta(days=QUOTA_MAX_AGE_DAYS):
+        return None
+    if datetime.fromisoformat(stored["reset_at"]) <= now:
+        return stored["limit"]
+    return stored["remaining"]
+
+
+def quota_allows_run(
+    stored: dict | None, reserve: int, now: datetime | None = None
+) -> bool:
+    """The pre-run gate: start unless the provider is known to be at the reserve."""
+    units = known_units(stored, now)
+    return units is None or units > reserve
 
 
 def due_airports(conn: sqlite3.Connection, limit: int, only: set | None = None) -> list:
@@ -328,8 +373,42 @@ def window_for(day_half: int) -> tuple:
     return offset, date
 
 
+def parse_quota(headers, now: datetime | None = None) -> dict | None:
+    """The provider's unit accounting from a response's headers, or None.
+
+    These headers are the only source of unit accounting (ARCHITECTURE.md
+    §4.1.8): the fetcher holds no unit cost and no period of its own, since both
+    were assumed wrong until 2026-10-03 — the call costs 2 units, not 1, and the
+    period is the subscription anniversary, not the calendar month.
+
+    None when any of the three is absent or not an integer. Timeouts, connection
+    resets and the per-second throttle 429 carry none of them.
+    """
+    try:
+        remaining = int(headers.get("X-RateLimit-API-Units-Remaining"))
+        limit = int(headers.get("X-RateLimit-API-Units-Limit"))
+        reset_seconds = int(headers.get("X-RateLimit-API-Units-Reset"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    now = now or datetime.now(timezone.utc)
+    return {
+        # An exhausted quota reports -1.
+        "remaining": max(0, remaining),
+        "limit": limit,
+        # Sent as seconds from now; stored absolute so it survives between runs.
+        "reset_at": (now + timedelta(seconds=reset_seconds)).isoformat(
+            timespec="seconds"
+        ),
+        "observed_at": now.isoformat(timespec="seconds"),
+    }
+
+
 def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
-    """Return (status, departures). status ∈ ok|empty|error|quota_exceeded."""
+    """Return (status, departures, quota).
+
+    status ∈ ok|empty|error|throttled|quota_exceeded; quota is `parse_quota`'s
+    result for the response, None when no response carried the unit headers.
+    """
     query = urllib.parse.urlencode(
         {
             "offsetMinutes": offset_minutes,
@@ -350,9 +429,11 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
         },
     )
     http_status = None
+    quota = None
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
             http_status = resp.status
+            quota = parse_quota(resp.headers)
             if http_status == 204:
                 # The API's documented answer for a window with no departures
                 # (OpenAPI GetAirportFlightsRelative), with an empty body. Parsing
@@ -361,12 +442,13 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
                 # half on every visit and its other half was never sampled. 42
                 # responses logged this way by 2026-09-17, 21 of 76 calls in that
                 # week's four runs.
-                return "empty", []
+                return "empty", [], quota
             body = json.load(resp)
         departures = body.get("departures") or []
-        return ("ok" if departures else "empty"), departures
+        return ("ok" if departures else "empty"), departures, quota
     except urllib.error.HTTPError as e:
         detail = e.read()[:200].decode("utf-8", "replace").strip()
+        quota = parse_quota(e.headers)
         if e.code == 429:
             # 429 is overloaded: the per-second limiter and the monthly quota
             # share it. Only the latter should stop the run — treating a
@@ -374,12 +456,15 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
             # report it as a normal quiet run.
             if "per second" in detail.lower():
                 print(f"  {icao}: throttled, backing off")
-                return "throttled", []
-            return "quota_exceeded", []
+                return "throttled", [], quota
+            # The body names which quota and which plan. Not printing it left
+            # the 2026-09-21 stall undiagnosable from the log.
+            print(f"  {icao}: HTTP 429: {detail}")
+            return "quota_exceeded", [], quota
         # The body is what identifies a Cloudflare block (1010) or an
         # unsubscribed key; the status alone is not diagnostic.
         print(f"  {icao}: HTTP {e.code}: {detail}")
-        return "error", []
+        return "error", [], quota
     except (OSError, json.JSONDecodeError) as e:
         # OSError, not TimeoutError: on Python 3.9 socket.timeout is a sibling of
         # TimeoutError under OSError, not an alias, so the narrower form lets one
@@ -387,7 +472,7 @@ def fetch_departures(api_key: str, icao: str, offset_minutes: int) -> tuple:
         # arrived, is what tells a malformed body apart from a network failure.
         where = f" (HTTP {http_status})" if http_status else ""
         print(f"  {icao}: {type(e).__name__}{where}: {e}")
-        return "error", []
+        return "error", [], quota
 
 
 def store_departures(
@@ -435,14 +520,24 @@ def run() -> dict:
     n_airports = refresh_airports(conn)
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    used = units_used_this_month(conn)
-    spendable = cfg["monthly_units"] - cfg["unit_reserve"] - used
-    budget = max(0, min(cfg["daily_calls"], spendable))
+    reserve = cfg["unit_reserve"]
+    stored = load_quota(conn)
+    units = known_units(stored)
+    # No units-to-calls conversion: that needs a unit cost, and the one held
+    # here was wrong. The run plans its normal queue and the headers cut it
+    # short, at the price of one over-planned run per period.
+    budget = cfg["daily_calls"] if quota_allows_run(stored, reserve) else 0
     queue, how = plan_queue(conn, budget, cfg)
 
+    known = "units unknown" if units is None else f"{units} units left"
+    # A stored reset time that has passed belongs to the period that just ended;
+    # the next one is not known until a response reports it.
+    reset_at = stored["reset_at"] if units is not None else None
+    if reset_at and datetime.fromisoformat(reset_at) <= datetime.now(timezone.utc):
+        reset_at = None
     print(
-        f"fetch_schedules: {n_airports} blackout airports, {used} units used this "
-        f"month, {budget} calls this run — {how}"
+        f"fetch_schedules: {n_airports} blackout airports, {known}, "
+        f"{budget} calls this run — {how}"
     )
 
     stats = {
@@ -452,23 +547,31 @@ def run() -> dict:
         "flights": 0,
         "queued": len(queue),
         "quota_exhausted": budget == 0,
-        "monthly_remaining": max(0, spendable),
-        "units_spent": 0,
+        "units_remaining": units,
+        "reset_at": reset_at,
     }
+
+    def call(icao: str, offset: int) -> tuple:
+        """One API call; a response that carries the unit headers is recorded."""
+        status, flights, quota = fetch_departures(cfg["api_key"], icao, offset)
+        if quota:
+            save_quota(conn, quota)
+            stats["units_remaining"] = quota["remaining"]
+            stats["reset_at"] = quota["reset_at"]
+        return status, flights, quota
 
     for i, (icao, half) in enumerate(queue):
         offset, window_date = window_for(half)
         calls = 1
-        status, flights = fetch_departures(cfg["api_key"], icao, offset)
+        status, flights, quota = call(icao, offset)
         if status == "throttled":
             time.sleep(REQUEST_PAUSE_SECONDS * 3)
             calls += 1
-            status, flights = fetch_departures(cfg["api_key"], icao, offset)
+            status, flights, quota = call(icao, offset)
             if status == "throttled":  # still throttled: record, keep going
                 status = "error"
-        stats["units_spent"] += calls
         if status == "quota_exceeded":
-            print(f"  429 at {icao} — monthly quota exhausted, stopping run.")
+            print(f"  429 at {icao} — unit quota exhausted, stopping run.")
             stats["quota_exhausted"] = True
             break
         stored = store_departures(conn, icao, flights, now_iso) if flights else 0
@@ -482,12 +585,18 @@ def run() -> dict:
         conn.commit()
         stats[status] += 1
         stats["flights"] += stored
+        # Only a figure from this response counts: a headerless one leaves the
+        # stored value alone and says nothing new about the quota.
+        if quota and quota["remaining"] <= reserve:
+            print(
+                f"  Unit reserve reached (remaining={quota['remaining']}) "
+                f"after {icao} — stopping run."
+            )
+            stats["quota_exhausted"] = True
+            break
         if i + 1 < len(queue):
             time.sleep(REQUEST_PAUSE_SECONDS)
 
-    # Recomputed after the loop from actual HTTP calls, not outcome counts: the
-    # pre-run figure ignores this run's spend, and outcome counts miss retries.
-    stats["monthly_remaining"] = max(0, spendable - stats["units_spent"])
     total = conn.execute("SELECT count(*) FROM raw_schedules").fetchone()[0]
     print(
         f"fetch_schedules done: {stats['ok']} ok, {stats['empty']} empty, "
@@ -498,15 +607,25 @@ def run() -> dict:
     return stats
 
 
-def classify(stats: dict) -> tuple:
-    """Quota exhaustion is the expected monthly end state, not a fault.
+def _reset_text(reset_at: str | None) -> str:
+    if reset_at is None:
+        return "at an unknown time"
+    when = datetime.fromisoformat(reset_at).astimezone(timezone.utc)
+    return f"{when:%Y-%m-%d %H:%M} UTC"
 
-    Near the 600-unit ceiling every remaining run of the month legitimately does
-    nothing, so alarming on it would fire a false positive every month by design.
-    A run that had budget and still collected nothing is the real signal.
+
+def classify(stats: dict) -> tuple:
+    """Quota exhaustion is the expected end state of a period, not a fault.
+
+    Once the provider's quota is spent every remaining run of the period
+    legitimately does nothing, so alarming on it would fire a false positive
+    every period by design. A run that had budget and still collected nothing is
+    the real signal. Whether a stop that comes early in the period should alarm
+    is open (ARCHITECTURE.md §4.1.8).
     """
+    resets = _reset_text(stats["reset_at"])
     if stats["quota_exhausted"] and stats["ok"] == 0:
-        return "QUIET", "monthly unit quota exhausted — resumes next month"
+        return "QUIET", f"unit quota exhausted — resumes {resets}"
     if stats["queued"] == 0:
         return "QUIET", "nothing due this window"
     if stats["ok"] == 0:
@@ -514,7 +633,9 @@ def classify(stats: dict) -> tuple:
             f"0 of {stats['queued']} airports returned schedules "
             f"({stats['empty']} empty, {stats['error']} errors)"
         )
-    return "OK", f"{stats['monthly_remaining']} units left this month"
+    units = stats["units_remaining"]
+    left = "units left unknown" if units is None else f"{units} units left"
+    return "OK", f"{left}, resets {resets}"
 
 
 if __name__ == "__main__":
