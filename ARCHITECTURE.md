@@ -686,8 +686,20 @@ around 2026-09-28 at 19 calls/day; read those two fields as lower bounds until t
   so the new agent must invoke the same CommandLineTools `python3` the fetchers use. A shell wrapper
   would need its own grant for `zsh` and would fail with `[Errno 1] Operation not permitted` — the
   signature of the 57-day silent outage.
+- **Neo4j is held only while needed — decided 2026-10-31.** The fetchers use SQLite alone and the
+  refresh is the only scheduled user of Neo4j, yet both containers ran permanently (~2.4 GB), which
+  stopped Docker's Resource Saver from ever engaging. `refresh.py` now starts staging just before
+  the load, so a skipped or empty run never starts it, and stops it after every run unless the
+  OpenSky API is listening, including a container started by hand, so a forgotten one clears itself.
+  The cost is that a Neo4j browser or cypher-shell session open at that moment is cut off. The check
+  follows the restart step because a restarted server loads from Neo4j. `load_graph.py` run by hand
+  leaves container state alone, the same separation as server restarts. It uses `docker start`/`stop`
+  rather than compose, which would read files under `~/Desktop` from a separately spawned binary (the
+  TCC constraint above), and a 120s stop grace because Docker's default 10s can SIGKILL Neo4j
+  mid-checkpoint. Docker Desktop is left alone: an unreachable daemon alarms. Production has no
+  scheduled user and is started by hand.
 
-Implementation is tracked as PLAN.md Phase 6.6; this closes ARCH-1 from the 2026-07-05 review.
+Implementation is tracked as PLAN.md Phase 6.6 and 6.24; 6.6 closes ARCH-1 from the 2026-07-05 review.
 
 **Separate tables, not a coerced shared one.** `raw_flights` is shaped around ADS-B observation
 (`icao24`, `callsign`, nullable `destination`, `first_seen`/`last_seen` observed timestamps).
@@ -1350,7 +1362,7 @@ pie title Memory Budget (24GB M4 Pro)
 
 At 14k nodes and 134k relationships, the entire graph fits in page cache with room to spare. No disk I/O during queries.
 
-> **Staging memory note:** The staging Neo4j container uses `docker-compose.staging.yml` and is not started by default. When active (`docker compose -f docker-compose.staging.yml up`), total Neo4j memory budget is ~3.75G — still safe on 24GB M4 Pro.
+> **Staging memory note:** The staging Neo4j container uses `docker-compose.staging.yml` and is not started by default. When active (`docker compose -f docker-compose.staging.yml up`), total Neo4j memory budget is ~3.75G — still safe on 24GB M4 Pro. Since 2026-10-31 neither container is resident: the refresh holds staging only for its run (Section 4.1.5, *Refresh chain*), so these are peak figures, not a standing cost.
 
 ---
 

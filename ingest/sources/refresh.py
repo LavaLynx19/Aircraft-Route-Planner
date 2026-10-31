@@ -25,6 +25,10 @@ drives three rules here:
 - a server that fails to come back, or comes back still serving the old snapshot,
   alarms. Replacing a stale-but-serving server with no server is worse than doing
   nothing
+
+The chain also owns the staging container's lifecycle, so Docker's Resource Saver
+can engage between runs: started only once a rebuild has something to load, stopped
+after every run unless the OpenSky API is listening (it queries Neo4j at runtime).
 """
 
 import json
@@ -35,6 +39,7 @@ import time
 import urllib.request
 
 import load_graph
+import staging_container
 from config import REPO_ROOT, servers_config
 from runner import run_guard
 
@@ -146,8 +151,35 @@ def _wait_healthy(port: int, previous_loaded_at: str) -> dict:
     return {}
 
 
+def _release_staging() -> str:
+    """Stop staging unless the OpenSky API needs it. Returns a stop failure, or "".
+
+    Checked after the restart step, because a restarted server loads its graph from
+    Neo4j. Stops a container started by hand too, so a forgotten one clears itself.
+    """
+    if _listener_pids(servers_config()["opensky"]):
+        print("--- OpenSky API is listening; leaving staging Neo4j up ---")
+        return ""
+    failure = staging_container.stop()
+    if failure:
+        print(f"--- could not stop staging Neo4j: {failure} ---")
+    else:
+        print("--- staging Neo4j stopped ---")
+    return failure
+
+
 def run() -> dict:
-    stats = load_graph.run()
+    try:
+        stats = _rebuild_and_restart()
+    finally:
+        stop_failure = _release_staging()
+    if stop_failure:
+        stats["container_stop_failed"] = stop_failure
+    return stats
+
+
+def _rebuild_and_restart() -> dict:
+    stats = load_graph.run(before_connect=staging_container.ensure_running)
     if stats.get("skipped"):
         # Nothing was rebuilt, so there is nothing for a restart to publish.
         return stats
@@ -185,6 +217,17 @@ def run() -> dict:
 
 
 def classify(stats: dict) -> tuple:
+    """The chain's verdict, noting a failed container stop without alarming on it.
+
+    A failed stop costs RAM, not data, so it never changes the outcome.
+    """
+    outcome, detail = _verdict(stats)
+    if stats.get("container_stop_failed"):
+        detail = f"{detail}; staging Neo4j still up: {stats['container_stop_failed']}"
+    return outcome, detail
+
+
+def _verdict(stats: dict) -> tuple:
     """Rebuild verdict first, then the restart half.
 
     A rebuild problem outranks a restart problem: if the graph was not rebuilt,

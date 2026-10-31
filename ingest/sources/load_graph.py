@@ -719,7 +719,13 @@ def upstream_state(conn: sqlite3.Connection) -> dict:
     }
 
 
-def run() -> dict:
+def run(before_connect=None) -> dict:
+    """Rebuild the staging graph.
+
+    `before_connect` runs only once there is something to load, so the refresh chain
+    can start Neo4j there and a skipped or empty run never starts it. A hand-run
+    passes nothing and leaves container state alone.
+    """
     conn = sqlite3.connect(SQLITE_PATH)
     try:
         gate = upstream_state(conn)
@@ -818,16 +824,19 @@ def run() -> dict:
             "stale_hours": gate["stale_hours"],
         }
 
+    if before_connect:
+        before_connect()
+
     cfg = staging_neo4j_config()
     driver = GraphDatabase.driver(cfg["uri"], auth=(cfg["user"], cfg["password"]))
     try:
         try:
             driver.verify_connectivity()
         except Exception as e:
-            # A precondition, not a load failure. Unattended, the useful message is
-            # "the database was not reachable" rather than a driver traceback: the
-            # staging container is started manually and does not always survive a
-            # reboot, so this is the likeliest way a scheduled rebuild fails.
+            # A precondition, not a load failure. The useful message is "the database
+            # was not reachable" rather than a driver traceback: a hand-run relies on
+            # the container having been started manually, and the refresh chain's
+            # `before_connect` should already have ruled this out.
             raise RuntimeError(
                 f"staging Neo4j unreachable at {cfg['uri']}: {type(e).__name__}"
             ) from e

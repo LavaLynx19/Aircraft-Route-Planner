@@ -1066,6 +1066,22 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
       maturity dates in §4.1.5/§4.1.7 and the tiering figures in 6.22 T1 are stale until pacing is
       decided → defer until: 6.23 T1–T4 are merged and one run has confirmed the header figures
 
+#### 6.24 Neo4j Held Only During the Refresh (ARCHITECTURE.md §4.1.5 *Refresh chain*, 2026-10-31)
+
+**Goal:** no container runs between refreshes, so Docker's Resource Saver can engage.
+
+- [x] `staging_container.py`: `ensure_running()` starts and waits for bolt, `stop()` with a 120s grace
+      and never raises; `docker start`/`stop`, not compose (TCC)
+- [x] `load_graph.run(before_connect=None)`: hook fires only when there is something to load
+- [x] `refresh.py`: stop staging after every run unless the OpenSky API is listening; a failed stop
+      is reported in the run detail, not alarmed
+- [x] Tests: `test_staging_container.py`
+- [x] Docs: ARCHITECTURE.md §4.1.5 and §7, RUNBOOK.md §4
+- [x] Verify under launchd: a kickstarted run with no API up ends with staging stopped; with the
+      OpenSky API up, the server restarts on a newer graph and staging stays up (both 2026-10-31)
+- [x] Verify Docker Desktop enters Resource Saver after its idle timeout (2026-10-31: VM process went
+      from ~1.27 GB to gone about 5 minutes after the last container stopped)
+
 ---
 
 ## Build Order (Commit Sequence)

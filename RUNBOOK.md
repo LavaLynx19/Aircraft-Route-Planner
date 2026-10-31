@@ -61,7 +61,7 @@ curl -s localhost:8081/health        # opensky
 |---|---|---|---|
 | launchd agent `com.aircraft-route-planner.fetch` | `fetch_flights.py` — fetches ~125 airports' flight data from OpenSky into SQLite (~3,750 of 4,000 daily credits) | daily 09:00 (runs on next wake if the Mac was asleep) | `ingest/data/fetch.log` |
 | launchd agent `com.aircraft-route-planner.schedules` | `fetch_schedules.py` — AeroDataBox schedules for the 443 ADS-B-blackout airports (China/Russia/CIS), ~19 calls a day against the free tier's 600 units per period (2 units a call) | daily 10:00 | `ingest/data/schedules.log` |
-| launchd agent `com.aircraft-route-planner.refresh` | `refresh.py` — rebuilds the staging graph from the SQLite cache, reconciles stale edges, then restarts whichever API servers are already running so the rebuild reaches clients. Skips quietly if a fetcher is still writing (ARCHITECTURE.md §4.1.5 *Refresh chain*) | daily 11:00 | `ingest/data/refresh.log`, servers to `ingest/data/api-<profile>.log` |
+| launchd agent `com.aircraft-route-planner.refresh` | `refresh.py` — rebuilds the staging graph from the SQLite cache, reconciles stale edges, then restarts whichever API servers are already running so the rebuild reaches clients. Starts the staging Neo4j container for the load and stops it afterwards unless the OpenSky API is listening. Skips quietly if a fetcher is still writing (ARCHITECTURE.md §4.1.5 *Refresh chain*) | daily 11:00 | `ingest/data/refresh.log`, servers to `ingest/data/api-<profile>.log` |
 
 **Unit accounting is the provider's, not ours** (ARCHITECTURE.md §4.1.8, since 2026-10-03). The
 fetcher reads `X-RateLimit-API-Units-Remaining`/`-Limit`/`-Reset` from each response and keeps the
@@ -115,7 +115,15 @@ everything (103s, against what was then a 90s budget) and the chain called it fa
 `refresh.STARTUP_BUDGET_SECONDS` is 180 for that reason; expect one slow restart after a Go upgrade.
 A failed restart alarms and names the profile and port, so it is loud rather than silent.
 
-Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), Docker containers, and the
+**Neo4j runs only when needed (since 2026-10-31).** The refresh starts `aircraft-route-neo4j-staging`
+for the load and stops it after every run unless the OpenSky API is listening on :8081. That includes
+a container you started by hand, so close any Neo4j browser or cypher-shell work before 11:00, or keep
+the API up. For ad-hoc use, start containers as in §1–§2; production is never started or stopped by a
+job. Docker Desktop must be open: the job does not launch it, and an unreachable daemon alarms. After a
+staging wipe the job alarms until you recreate the container with
+`docker compose -f docker-compose.staging.yml up -d`.
+
+Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), the production container, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and
 restarts any server already running** (§4.1.5 *Refresh chain*), so a server you leave up picks up
 each day's reconciliation on its own; one you stop stays stopped.
@@ -184,7 +192,7 @@ docker exec -i aircraft-route-neo4j-staging cypher-shell \
 ```
 
 A large marked-stale count is normal after a fetch gap: those edges failed the validity filter
-and were previously being served only because the loader had no authority to retract them. The API servers keep running until stopped or reboot; the Docker containers restart per Docker Desktop's own policy.
+and were previously being served only because the loader had no authority to retract them. The API servers keep running until stopped or reboot. Neither container has a restart policy, so neither comes back on its own after a reboot; the refresh starts staging when it needs it.
 
 ```bash
 launchctl list | grep aircraft-route-planner                                    # is it loaded? (2nd column = last exit status)
