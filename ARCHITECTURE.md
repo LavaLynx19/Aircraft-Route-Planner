@@ -698,8 +698,17 @@ around 2026-09-28 at 19 calls/day; read those two fields as lower bounds until t
   TCC constraint above), and a 120s stop grace because Docker's default 10s can SIGKILL Neo4j
   mid-checkpoint. Docker Desktop is left alone: an unreachable daemon alarms. Production has no
   scheduled user and is started by hand.
+- **Runs survive the Mac sleeping — decided 2026-11-03.** launchd fires an overdue job in whatever
+  wake it gets, sometimes a 2-second DarkWake. On 2026-11-03 the Mac slept mid-run, the wall-clock
+  readiness budget expired during sleep, and the refresh stopped Neo4j 2 seconds into its boot. Fetch
+  connection resets also climbed from 2 to 15 a day. There are two layers of fix:
+  - Every `run_guard` job spawns `caffeinate -i -s -w <pid>` to hold the Mac awake until it exits. It
+    runs as a child process rather than wrapping the plist command, which keeps the Full Disk Access
+    grant on python3.
+  - macOS may still sleep on battery or with the lid closed, so every timeout uses `time.monotonic()`,
+    which pauses during sleep on macOS, instead of `time.time()`.
 
-Implementation is tracked as PLAN.md Phase 6.6 and 6.24; 6.6 closes ARCH-1 from the 2026-07-05 review.
+Implementation is tracked as PLAN.md Phase 6.6, 6.24 and 6.25; 6.6 closes ARCH-1 from the 2026-07-05 review.
 
 **Separate tables, not a coerced shared one.** `raw_flights` is shaped around ADS-B observation
 (`icao24`, `callsign`, nullable `destination`, `first_seen`/`last_seen` observed timestamps).

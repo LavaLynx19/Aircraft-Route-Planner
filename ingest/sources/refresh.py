@@ -102,8 +102,8 @@ def _stop(port: int) -> bool:
     for pid in _listener_pids(port):
         _signal_group(pid, signal.SIGTERM)
 
-    deadline = time.time() + SHUTDOWN_BUDGET_SECONDS
-    while time.time() < deadline:
+    deadline = time.monotonic() + SHUTDOWN_BUDGET_SECONDS
+    while time.monotonic() < deadline:
         if not _listener_pids(port):
             return True
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -142,8 +142,8 @@ def _wait_healthy(port: int, previous_loaded_at: str) -> dict:
     empty `previous_loaded_at` (a server predating the freshness field) makes any
     stamped response newer, which is the correct reading.
     """
-    deadline = time.time() + STARTUP_BUDGET_SECONDS
-    while time.time() < deadline:
+    deadline = time.monotonic() + STARTUP_BUDGET_SECONDS
+    while time.monotonic() < deadline:
         data = _health(port)
         if data and data.get("graph_loaded_at", "") > previous_loaded_at:
             return data

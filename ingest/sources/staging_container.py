@@ -52,13 +52,17 @@ def _wait_ready() -> None:
 
     `docker start` returns when the process launches, well before bolt answers. A
     wrong password will not fix itself by waiting, so it fails at once.
+
+    The budget uses the monotonic clock, which on macOS pauses while the Mac
+    sleeps. On 2026-11-03 a run started in a 2-second DarkWake: the wall-clock
+    budget ran out during sleep, and the run gave up 2 seconds into Neo4j's boot.
     """
     cfg = staging_neo4j_config()
     driver = GraphDatabase.driver(cfg["uri"], auth=(cfg["user"], cfg["password"]))
     last_error = "no connection attempt completed"
-    deadline = time.time() + READY_BUDGET_SECONDS
+    deadline = time.monotonic() + READY_BUDGET_SECONDS
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             try:
                 driver.verify_connectivity()
                 return

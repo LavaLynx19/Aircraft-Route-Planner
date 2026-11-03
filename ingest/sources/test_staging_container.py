@@ -112,7 +112,7 @@ class TestEnsureRunning:
         driver = _FakeDriver([ServiceUnavailable("booting")])
         _use_driver(monkeypatch, driver)
         clock = iter([0, 1, staging_container.READY_BUDGET_SECONDS + 1])
-        monkeypatch.setattr(staging_container.time, "time", lambda: next(clock))
+        monkeypatch.setattr(staging_container.time, "monotonic", lambda: next(clock))
         with pytest.raises(RuntimeError, match="ServiceUnavailable"):
             staging_container.ensure_running()
         assert driver.closed
