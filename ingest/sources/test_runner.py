@@ -17,6 +17,40 @@ def _ok(stats=None):
     return lambda: stats or {"ok": 1, "queued": 1}
 
 
+@pytest.fixture(autouse=True)
+def no_caffeinate(monkeypatch):
+    """Guard tests must not spawn a real caffeinate tied to pytest's PID."""
+    calls = []
+    monkeypatch.setattr(runner, "hold_awake", lambda: calls.append(True))
+    return calls
+
+
+class TestHoldAwake:
+    def test_every_run_holds_the_mac_awake(self, notified, no_caffeinate):
+        runner.run_guard("T", _ok(), lambda s: ("OK", ""))
+        assert no_caffeinate == [True]
+
+    def test_assertion_is_tied_to_this_process(self, monkeypatch):
+        monkeypatch.undo()
+        seen = []
+        monkeypatch.setattr(
+            runner.subprocess, "Popen", lambda cmd, **kw: seen.append(cmd)
+        )
+        monkeypatch.setattr(runner.os, "getpid", lambda: 4242)
+        runner.hold_awake()
+        assert seen == [["/usr/bin/caffeinate", "-i", "-s", "-w", "4242"]]
+
+    def test_missing_caffeinate_does_not_fail_the_run(self, monkeypatch, capsys):
+        monkeypatch.undo()
+
+        def missing(cmd, **kw):
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr(runner.subprocess, "Popen", missing)
+        runner.hold_awake()
+        assert "could not hold the Mac awake" in capsys.readouterr().out
+
+
 class TestRunGuard:
     def test_clean_run_is_silent_and_exits_zero(self, notified):
         runner.run_guard("T", _ok(), lambda s: ("OK", ""))

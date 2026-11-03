@@ -15,11 +15,38 @@ Callers supply a `classify` function so each fetcher decides what "collected
 nothing" means for its own source.
 """
 
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 
 NOTIFY_TITLE = "aircraft-route-planner"
+CAFFEINATE = "/usr/bin/caffeinate"
+
+
+def hold_awake() -> None:
+    """Ask macOS not to sleep until this process exits.
+
+    launchd fires an overdue job in whatever wake it gets, which can be a
+    seconds-long DarkWake. The Mac then sleeps mid-run, cutting network calls and
+    stalling the refresh (2026-11-02 and 2026-11-03). `-w` ties the assertion to
+    our PID, so it ends however the run exits. `-i` blocks idle sleep and `-s`
+    blocks system sleep on AC power. macOS may still sleep on battery or with the
+    lid closed, which is why the waits also use the monotonic clock.
+
+    A spawned child, not a plist wrapper: Full Disk Access is granted to the
+    python3 binary the plist names, and wrapping it in caffeinate risks the TCC
+    failure RUNBOOK §4 describes. caffeinate touches no files, so it needs no grant.
+    """
+    try:
+        subprocess.Popen(
+            [CAFFEINATE, "-i", "-s", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        # An optimisation, not a precondition: the run can still succeed awake.
+        print(f"--- could not hold the Mac awake: {type(e).__name__}: {e} ---")
 
 
 def notify(message: str) -> None:
@@ -62,6 +89,7 @@ def run_guard(label: str, run_fn, classify, work_stage: str = "fetch") -> None:
         sys.stdout.reconfigure(line_buffering=True)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"--- run started {started} ---")
+    hold_awake()
 
     # `classify` runs inside the guard too. It was outside until 2026-09-12, which
     # left the guard with a hole in exactly the shape it exists to prevent: a

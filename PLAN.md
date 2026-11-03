@@ -1082,6 +1082,21 @@ wrong on both. Scope is accounting only; pacing, the paid tier and alarming stay
 - [x] Verify Docker Desktop enters Resource Saver after its idle timeout (2026-10-31: VM process went
       from ~1.27 GB to gone about 5 minutes after the last container stopped)
 
+#### 6.25 Scheduled Runs Survive Sleep (ARCHITECTURE.md §4.1.5 *Refresh chain*, 2026-11-03)
+
+**Goal:** a job launched in a brief DarkWake neither fails on a slept-through timeout nor loses
+network calls to sleep.
+
+- [x] Timeouts in `staging_container._wait_ready` and `refresh._stop`/`_wait_healthy` use
+      `time.monotonic()`
+- [x] `runner.hold_awake()`: `caffeinate -i -s -w <pid>`, spawned by `run_guard` for every job
+- [x] Tests: `test_runner.py` (`TestHoldAwake`), `test_staging_container.py` clock
+- [x] Docs: ARCHITECTURE.md §4.1.5, RUNBOOK.md §4
+- [x] Verify under launchd: a kickstarted refresh shows a `caffeinate` assertion and ends `run OK`
+      (2026-11-03: system and idle sleep held for the job's PID, released at exit, 69,501 edges)
+- [ ] Verify unattended: a week of refresh runs with no `not ready within` failure, and fetch errors
+      back near 2 a day
+
 ---
 
 ## Build Order (Commit Sequence)

@@ -123,6 +123,11 @@ job. Docker Desktop must be open: the job does not launch it, and an unreachable
 staging wipe the job alarms until you recreate the container with
 `docker compose -f docker-compose.staging.yml up -d`.
 
+**Jobs hold the Mac awake (since 2026-11-03).** Each job spawns `caffeinate` for its own lifetime, so
+`pmset -g assertions` lists a `caffeinate` assertion while a job runs. On battery or with the lid
+closed macOS may sleep anyway. The refresh's timeouts then count only awake time, so a run that sleeps
+resumes on wake instead of failing with `not ready within 180s`.
+
 Nothing else is scheduled: `sweep_stale.py` (stale-edge deletion), the production container, and the
 *initial* start of an API server are all manual. As of 2026-09-13 the chain rebuilds the graph **and
 restarts any server already running** (§4.1.5 *Refresh chain*), so a server you leave up picks up
